@@ -1,0 +1,20 @@
+{
+  "name": "harvis-lite",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Agente local ligero con canales modulares, skills y servidor MCP.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "mcp": "node src/mcp-server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "mammoth": "^1.13.0",
+    "pdf-parse": "^2.4.5"
+  }
+}
