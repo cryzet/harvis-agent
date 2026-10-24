@@ -19,7 +19,7 @@ const defaults = {
     model: "",
     apiKey: "",
     temperature: 0.2,
-    maxTokens: 1024,
+    maxTokens: 1000,
   },
   channels: [{ type: "console", enabled: true }],
   skills: {},
@@ -73,6 +73,7 @@ export function loadConfig(paths = getPaths(), { deferProviderUrlValidation = fa
     mcp: { ...defaults.mcp, ...stored.mcp },
     web: { ...defaults.web, ...stored.web },
   };
+  if (config.provider.maxTokens === 1024) config.provider.maxTokens = 1000;
   config.provider.baseUrl = process.env.OPENAI_BASE_URL || config.provider.baseUrl;
   config.provider.model = process.env.OPENAI_MODEL || config.provider.model;
   config.provider.apiKey = process.env.OPENAI_API_KEY || config.provider.apiKey;

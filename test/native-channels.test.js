@@ -157,7 +157,7 @@ test("WhatsApp only handles the configured international number, including LID a
     ]);
 
     const approvalRequest = received[0].requestApproval("leer ~/notes.txt");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitFor(() => baileys.lastSocket.sent.at(-1)?.text.includes("leer ~/notes.txt"));
     const approvalPrompt = baileys.lastSocket.sent.at(-1).text;
     const approvalCode = approvalPrompt.match(/\/aprobar (\d{6})/)[1];
     baileys.lastSocket.ev.emit("messages.upsert", {
@@ -197,7 +197,8 @@ test("WhatsApp only handles the configured international number, including LID a
         },
       }],
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await waitFor(() => baileys.lastSocket.sent.at(-1)?.text.includes('recibir y guardar "notes.txt"'));
     const receivePrompt = baileys.lastSocket.sent.at(-1).text;
     const receiveCode = receivePrompt.match(/\/aprobar (\d{6})/)[1];
     baileys.lastSocket.ev.emit("messages.upsert", {
@@ -211,7 +212,7 @@ test("WhatsApp only handles the configured international number, including LID a
         message: { conversation: `/aprobar ${receiveCode}` },
       }],
     });
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await waitFor(() => received.length === 2);
     assert.equal(received.length, 2);
     assert.match(received[1].text, /Archivo recibido y guardado/);
     assert.equal(await readFile(received[1].attachment.path, "utf8"), "received attachment");
@@ -228,6 +229,14 @@ test("WhatsApp only handles the configured international number, including LID a
         message: { conversation: "No autorizado" },
       }],
     });
+
+    async function waitFor(predicate, timeout = 2000) {
+      const deadline = Date.now() + timeout;
+      while (!predicate()) {
+        if (Date.now() >= deadline) throw new Error("Timed out waiting for WhatsApp test event.");
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(received.length, 2);
     assert.equal(baileys.lastSocket.sent.length, sentBeforeUnauthorizedMessage);

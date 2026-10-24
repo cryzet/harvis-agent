@@ -41,6 +41,18 @@ test("uses a new isolated profile directory for Harvis Lite", () => {
   );
 });
 
+test("sets the default response limit to 1000 tokens and migrates the old default", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harvis-token-limit-"));
+  const paths = getPaths({ APPDATA: root }, "win32");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  assert.equal(loadConfig(paths).provider.maxTokens, 1000);
+
+  const legacyConfig = JSON.parse(await readFile(paths.configFile, "utf8"));
+  legacyConfig.provider.maxTokens = 1024;
+  await writeFile(paths.configFile, JSON.stringify(legacyConfig));
+  assert.equal(loadConfig(paths).provider.maxTokens, 1000);
+});
+
 test("supports environment configuration for remote model providers", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harvis-provider-"));
   const paths = getPaths({ APPDATA: root }, "win32");

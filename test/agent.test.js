@@ -26,6 +26,12 @@ test("uses OpenAI-compatible provider tool calls and retains conversation", asyn
     { choices: [{ message: { role: "assistant", content: "Skill creada." } }] },
     { choices: [{ message: { role: "assistant", content: "Claro." } }] },
   ];
+  let timeout;
+  const originalTimeout = AbortSignal.timeout;
+  t.mock.method(AbortSignal, "timeout", (milliseconds) => {
+    timeout = milliseconds;
+    return originalTimeout(milliseconds);
+  });
   t.mock.method(globalThis, "fetch", async (_url, request) => {
     payloads.push(JSON.parse(request.body));
     return new Response(JSON.stringify(responses.shift()), { status: 200 });
@@ -39,7 +45,7 @@ test("uses OpenAI-compatible provider tool calls and retains conversation", asyn
         model: "local-model",
         apiKey: "",
         temperature: 0.2,
-        maxTokens: 256,
+        maxTokens: 1000,
       },
     },
     paths: { skillsDir },
@@ -57,6 +63,8 @@ test("uses OpenAI-compatible provider tool calls and retains conversation", asyn
 
   assert.equal(await agent.reply("Crea una skill para planificar el día"), "Skill creada.");
   assert.equal(savedSkill, "daily");
+  assert.equal(payloads[0].max_tokens, 1000);
+  assert.equal(timeout, 180_000);
   assert.equal(await agent.reply("Gracias"), "Claro.");
   assert.equal(payloads[0].model, "local-model");
   assert.equal(payloads[0].tools[0].function.name, "create_skill");

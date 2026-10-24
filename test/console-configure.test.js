@@ -28,7 +28,7 @@ test("normalizes LM Studio chat URLs to the OpenAI-compatible v1 route", () => {
   );
 });
 
-test("provider verification uses a 120-second chat completion request", async (t) => {
+test("provider verification uses a 180-second chat completion request", async (t) => {
   const terminal = new InteractiveConsole({
     config: {
       provider: {
@@ -42,6 +42,12 @@ test("provider verification uses a 120-second chat completion request", async (t
     handlers: {},
   });
   let request;
+  let timeout;
+  const originalTimeout = AbortSignal.timeout;
+  t.mock.method(AbortSignal, "timeout", (milliseconds) => {
+    timeout = milliseconds;
+    return originalTimeout(milliseconds);
+  });
   t.mock.method(globalThis, "fetch", async (url, options) => {
     request = { url: String(url), options };
     return new Response(JSON.stringify({
@@ -54,10 +60,11 @@ test("provider verification uses a 120-second chat completion request", async (t
   assert.equal(request.url, "http://127.0.0.1:1234/v1/chat/completions");
   assert.equal(request.options.headers.Authorization, "Bearer local-secret");
   assert.equal(JSON.parse(request.options.body).model, "google/gemma-4-e2b");
-  assert.equal(JSON.parse(request.options.body).max_tokens, 512);
+  assert.equal(JSON.parse(request.options.body).max_tokens, 1000);
   assert.match(JSON.parse(request.options.body).messages[0].content, /exactamente con la palabra OK/);
   assert.equal(JSON.parse(request.options.body).stream, false);
   assert.ok(request.options.signal instanceof AbortSignal);
+  assert.equal(timeout, 180_000);
 });
 
 test("provider verification explains when reasoning consumes the output token limit", async (t) => {

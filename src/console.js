@@ -511,15 +511,15 @@ export class InteractiveConsole {
             role: "user",
             content: "Responde exactamente con la palabra OK, sin explicación.",
           }],
-          max_tokens: 512,
+          max_tokens: 1000,
           temperature: 0,
           stream: false,
         }),
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(180_000),
       });
     } catch (error) {
       if (error.name === "TimeoutError" || error.name === "AbortError") {
-        throw new Error("La prueba agotó 120 segundos. El modelo puede estar cargándose; espera a que LM Studio lo termine de cargar y vuelve a probar.");
+        throw new Error("La prueba agotó 180 segundos. El modelo puede estar cargándose; espera a que LM Studio lo termine de cargar y vuelve a probar.");
       }
       throw new Error(`No se pudo conectar al endpoint ${endpoint}: ${error.message}`);
     }

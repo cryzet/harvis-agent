@@ -65,10 +65,11 @@ compatible `GET /v1/models`. Para otros proveedores compatibles consulta
 `/models` bajo la URL configurada. La última opción permite introducir el ID
 manualmente; los errores de conexión o autenticación se informan. Para chat,
 si la URL de LM Studio es solo el host o termina en `/api/v1`, Harvis la
-normaliza al endpoint compatible `/v1/chat/completions`. La prueba de conexión
-espera hasta 120 segundos para permitir que un modelo local termine de cargar
-y permite hasta 512 tokens de salida, para que los modelos con razonamiento
-interno tengan espacio para producir la respuesta final.
+normaliza al endpoint compatible `/v1/chat/completions`. Las respuestas del
+agente y la prueba de conexión permiten hasta 1000 tokens de salida. Cada
+solicitud al proveedor espera hasta 3 minutos, para permitir que un modelo local
+termine de cargar y generar su respuesta. Los perfiles que usaban el límite
+predeterminado anterior de 1024 tokens se actualizan automáticamente a 1000.
 
 `/configure` abre el menú de secciones **Modelo / autenticación**, **Canales**,
 **Skills**, **Perfil del agente**, **Búsqueda web y scraping** y **MCP local**,

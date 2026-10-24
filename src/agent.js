@@ -117,7 +117,7 @@ export class Agent {
         max_tokens: maxTokens,
         tools: this.tools.length ? this.tools : undefined,
       }),
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(180_000),
     });
     if (!response.ok) {
       const body = await response.text();
