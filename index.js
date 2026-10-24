@@ -15,6 +15,14 @@ import { getAvailableModels as fetchAvailableModels } from "./src/provider-model
 import { scrapeWebPage, searchWeb, webToolDefinitions } from "./src/web-tools.js";
 import { ChannelManager } from "./src/channels.js";
 import { normalizeInternationalPhoneNumber } from "./src/phone-number.js";
+import { createCustomerAgent } from "./src/customer-agent.js";
+import {
+  changeIgnoredNumber,
+  readCustomerInstructions,
+  readIgnoredNumbers,
+  updateCustomerInstructions,
+  getConfiguredAdminNumbers,
+} from "./src/client-access.js";
 
 const paths = getPaths();
 let config = loadConfig(paths, { deferProviderUrlValidation: true });
@@ -25,11 +33,7 @@ const terminal = new InteractiveConsole({
   save: () => saveConfig(config, paths),
   handlers: {
     reply: (text) => agent.reply(text, "console", {
-      requestApproval: async (action) => ["s", "si", "sí"].includes(
-        (await terminal.ask(`Harvis solicita autorización para ${action}. ¿Permitir? [s/N]: `))
-          .trim()
-          .toLowerCase(),
-      ),
+      role: "admin",
     }),
     status: () => status(),
     models: () => listModels(),
@@ -51,6 +55,11 @@ const terminal = new InteractiveConsole({
     createSkill: (args) => createNewSkill(args),
     installSkill: (name) => installSkill(name),
     installChannel: (name) => installChannel(name),
+    readInstructions: () => readCustomerInstructions(paths),
+    writeInstructions: (content) => updateCustomerInstructions(paths, content),
+    ignoredNumbers: () => readIgnoredNumbers(paths),
+    changeIgnoredNumber: (number, action) =>
+      changeIgnoredNumber(paths, number, action, getConfiguredAdminNumbers(config)),
   },
 });
 
@@ -139,6 +148,13 @@ function authorizeChannel(type, senderId) {
   if (!channel) throw new Error(`El canal "${type}" no está instalado.`);
   const id = String(senderId).trim();
   if (!id) throw new Error("El identificador del contacto no puede estar vacío.");
+  if (type === "whatsapp") {
+    const number = normalizeInternationalPhoneNumber(id);
+    channel.adminNumber = number;
+    channel.allowFrom = [number];
+    saveConfig(config, paths);
+    return `Número administrador de WhatsApp configurado: ${number}.`;
+  }
   channel.allowFrom ??= [];
   if (!channel.allowFrom.includes(id)) channel.allowFrom.push(id);
   saveConfig(config, paths);
@@ -201,6 +217,7 @@ async function configureWhatsAppNumber(input = "") {
   }
   const number = normalizeInternationalPhoneNumber(value);
   entry.allowFrom = [number];
+  entry.adminNumber = number;
   entry.enabled = true;
   saveConfig(config, paths);
   const applied = (await getServiceStatus(paths)).running;
@@ -221,18 +238,28 @@ async function linkWhatsApp() {
   if (!channel?.enabled) {
     throw new Error("Instala y habilita WhatsApp antes de solicitar un QR.");
   }
-  if (!channel.allowFrom?.some((number) => String(number).startsWith("+"))) {
+  if (!getConfiguredAdminNumbers(channel).length) {
     throw new Error("Configura primero el número autorizado: /configure channel whatsapp number <+código-país-número>.");
   }
   const serviceWasRunning = config.setupComplete &&
     (await getServiceStatus(paths)).running;
   if (serviceWasRunning) await stopService(paths);
+  const customerAgent = createCustomerAgent({ config, paths });
   const manager = new ChannelManager(
     config,
     paths,
-    async ({ text, sender, requestApproval, sendFile }) => agent
-      ? agent.reply(text, `whatsapp:${sender}`, { requestApproval, sendFile })
-      : "Harvis está terminando la configuración inicial.",
+    async ({ text, sender, role, phoneNumber, sendFile, channelType }) => {
+      if (role === "client" && channelType === "whatsapp") {
+        return customerAgent.reply(text, phoneNumber ?? sender);
+      }
+      if (role !== "admin") throw new Error("El remitente no tiene un rol autorizado para este canal.");
+      return agent
+        ? agent.reply(text, `whatsapp:${sender}`, {
+          role: "admin",
+          ...(sendFile ? { sendFile } : {}),
+        })
+        : "Harvis está terminando la configuración inicial.";
+    },
     () => saveConfig(config, paths),
   );
   try {

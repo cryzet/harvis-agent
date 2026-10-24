@@ -139,6 +139,44 @@ test("console exposes service lifecycle commands", async () => {
     },
   });
 
+  test("console exposes direct admin commands for customer instructions and ignored numbers", async () => {
+    const calls = [];
+    const terminal = new InteractiveConsole({
+      config: {},
+      save() {},
+      handlers: {
+        readInstructions: async () => "Horario anterior.",
+        writeInstructions: async (content) => {
+          calls.push(["instructions", content]);
+          return "Instrucciones guardadas.";
+        },
+        ignoredNumbers: async () => ["+14155552671"],
+        changeIgnoredNumber: async (number, action) => {
+          calls.push(["ignore", number, action]);
+          return "Lista actualizada.";
+        },
+      },
+    });
+
+    assert.equal(
+      await terminal.command("/configure instructions show"),
+      "Horario anterior.",
+    );
+    assert.equal(
+      await terminal.command("/configure instructions set Horario nuevo"),
+      "Instrucciones guardadas.",
+    );
+    assert.equal(await terminal.command("/configure ignore list"), "+14155552671");
+    assert.equal(
+      await terminal.command("/configure ignore add +14155552672"),
+      "Lista actualizada.",
+    );
+    assert.deepEqual(calls, [
+      ["instructions", "Horario nuevo"],
+      ["ignore", "+14155552672", "add"],
+    ]);
+  });
+
   assert.equal(await terminal.command("/start"), "started");
   assert.equal(await terminal.command("/stop"), "stopped");
   assert.equal(await terminal.command("/restart"), "restarted");

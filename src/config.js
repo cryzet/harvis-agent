@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { ensureClientProfileFilesSync } from "./client-access.js";
 
 const defaults = {
   name: "Harvis",
@@ -43,6 +44,8 @@ export function getPaths(env = process.env, platform = process.platform) {
     skillsDir: join(root, "skills"),
     channelsDir: join(root, "channels"),
     whatsappAuthDir: join(root, "whatsapp-auth"),
+    instructionsFile: join(root, "Instrucciones.txt"),
+    ignoreFile: join(root, "Ignore.txt"),
     serviceStateFile: join(root, "service.json"),
     serviceLockFile: join(root, "service.lock"),
     serviceLogFile: join(root, "service.log"),
@@ -54,6 +57,7 @@ export function loadConfig(paths = getPaths(), { deferProviderUrlValidation = fa
   mkdirSync(paths.skillsDir, { recursive: true, mode: 0o700 });
   mkdirSync(paths.channelsDir, { recursive: true, mode: 0o700 });
   mkdirSync(paths.whatsappAuthDir, { recursive: true, mode: 0o700 });
+  ensureClientProfileFilesSync(paths);
   if (!existsSync(paths.configFile)) saveConfig(defaults, paths);
 
   let stored;

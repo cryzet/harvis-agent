@@ -33,6 +33,8 @@ export async function createChannel(config) {
             text: message.text,
             sender: `telegram:${message.chat.id}:${senderId}`,
             metadata: message,
+            role: "admin",
+            channelType: "telegram",
           });
           if (answer) await context.reply(String(answer));
         } catch (error) {

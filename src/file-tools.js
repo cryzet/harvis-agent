@@ -12,6 +12,13 @@ import {
 import { homedir } from "node:os";
 import mammoth from "mammoth";
 import {
+  changeIgnoredNumber,
+  getConfiguredAdminNumbers,
+  readCustomerInstructions,
+  readIgnoredNumbers,
+  updateCustomerInstructions,
+} from "./client-access.js";
+import {
   basename,
   dirname,
   extname,
@@ -28,39 +35,75 @@ const allowedTextExtensions = new Set([
   ".txt", ".md", ".csv", ".json", ".log", ".yaml", ".yml", ".xml", ".html", ".htm",
 ]);
 
+export function getAgentWorkDirectory(name, home = homedir()) {
+  const safeName = String(name || "Harvis")
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .replace(/[. ]+$/g, "")
+    .slice(0, 80) || "Harvis";
+  return resolve(home, "Documents", `${safeName}_WorkDir`);
+}
+
+export async function prepareWorkDirectory(name) {
+  const target = getAgentWorkDirectory(name);
+  const documents = resolve(homedir(), "Documents");
+  await mkdir(documents, { recursive: true, mode: 0o700 });
+  await mkdir(target, { recursive: true, mode: 0o700 });
+  const [realDocuments, realTarget] = await Promise.all([realpath(documents), realpath(target)]);
+  assertInsideRoot(realDocuments, realTarget);
+  return realTarget;
+}
+
 export const fileToolDefinitions = [
-  tool("list_files", "Lista archivos y carpetas de una ruta dentro de la carpeta personal. Requiere autorización previa.", {
-    path: { type: "string", description: "Ruta relativa a la carpeta personal; por defecto, la raíz." },
+  tool("list_files", "Lista archivos y carpetas dentro de Documents/<nombre>_WorkDir. Disponible solo para el administrador autenticado.", {
+    path: { type: "string", description: "Ruta relativa al directorio de trabajo; por defecto, la raíz." },
   }),
-  tool("read_file", "Lee un archivo de texto o una imagen dentro de la carpeta personal. Requiere autorización previa.", {
-    path: { type: "string", description: "Ruta relativa o absoluta dentro de la carpeta personal." },
+  tool("read_file", "Lee un archivo de texto, documento o imagen dentro del directorio de trabajo. Disponible solo para el administrador autenticado.", {
+    path: { type: "string", description: "Ruta relativa o absoluta dentro de Documents/<nombre>_WorkDir." },
   }, ["path"]),
-  tool("write_file", "Crea o reemplaza un archivo dentro de la carpeta personal. Requiere autorización previa.", {
-    path: { type: "string", description: "Ruta relativa o absoluta dentro de la carpeta personal; la carpeta debe existir." },
+  tool("write_file", "Crea o reemplaza un archivo dentro del directorio de trabajo. Disponible solo para el administrador autenticado.", {
+    path: { type: "string", description: "Ruta relativa o absoluta dentro de Documents/<nombre>_WorkDir; la carpeta debe existir." },
     content: { type: "string", description: "Contenido de texto que se guardará." },
   }, ["path", "content"]),
-  tool("delete_file", "Elimina un archivo (no una carpeta) dentro de la carpeta personal. Requiere autorización previa.", {
-    path: { type: "string", description: "Ruta relativa o absoluta dentro de la carpeta personal." },
+  tool("delete_file", "Elimina un archivo (no una carpeta) dentro del directorio de trabajo. Disponible solo para el administrador autenticado.", {
+    path: { type: "string", description: "Ruta relativa o absoluta dentro de Documents/<nombre>_WorkDir." },
   }, ["path"]),
-  tool("send_file", "Envía por WhatsApp un archivo de la carpeta personal al usuario que lo solicitó. Requiere autorización previa.", {
-    path: { type: "string", description: "Ruta relativa o absoluta dentro de la carpeta personal." },
+  tool("send_file", "Envía por WhatsApp un archivo del directorio de trabajo al administrador autenticado, sin OTP.", {
+    path: { type: "string", description: "Ruta relativa o absoluta dentro de Documents/<nombre>_WorkDir." },
     caption: { type: "string", description: "Texto opcional que acompaña al archivo." },
   }, ["path"]),
+  tool("manage_ignored_number", "Administra números de WhatsApp excluidos de las respuestas a clientes. Solo administrador.", {
+    action: { type: "string", enum: ["list", "add", "remove"] },
+    number: { type: "string", description: "Número internacional E.164. No se requiere para listar." },
+  }, ["action"]),
+  tool("read_client_instructions", "Lee Instrucciones.txt, la única fuente de información para responder a clientes. Solo administrador.", {}),
+  tool("write_client_instructions", "Actualiza Instrucciones.txt, la fuente de información del subagente de clientes. Solo administrador.", {
+    content: { type: "string", description: "Información segura para compartir con clientes." },
+  }, ["content"]),
 ];
 
-export function createFileToolHandlers() {
+export function createFileToolHandlers({
+  config,
+  paths,
+  workDirectory = prepareWorkDirectory,
+} = {}) {
+  if (!config?.name || !paths?.instructionsFile || !paths?.ignoreFile) {
+    throw new Error("Se requiere la configuración del agente y las rutas de perfil para las herramientas.");
+  }
   return {
     list_files: async ({ path = "." } = {}, context) => {
-      const target = await resolveSafePath(path);
-      await requireApproval(context, `listar el contenido de ${displayPath(target)}`);
+      requireAdmin(context);
+      const root = await workDirectory(config.name);
+      const target = await resolveSafePath(path, root);
       const entries = await readdir(target, { withFileTypes: true });
       return entries.slice(0, 200).map((entry) =>
         `${entry.isDirectory() ? "[carpeta]" : "[archivo]"} ${entry.name}`,
       ).join("\n") || "La carpeta está vacía.";
     },
     read_file: async ({ path }, context) => {
-      const target = await resolveSafePath(path);
-      await requireApproval(context, `leer ${displayPath(target)}`);
+      requireAdmin(context);
+      const root = await workDirectory(config.name);
+      const target = await resolveSafePath(path, root);
       const info = await stat(target);
       if (!info.isFile()) throw new Error("Solo se pueden leer archivos, no carpetas.");
       const extension = extname(target).toLowerCase();
@@ -103,15 +146,13 @@ export function createFileToolHandlers() {
       return buffer.toString("utf8");
     },
     write_file: async ({ path, content }, context) => {
+      requireAdmin(context);
       if (typeof content !== "string") throw new Error("El contenido debe ser texto.");
       if (Buffer.byteLength(content) > maxTextBytes) {
         throw new Error("El contenido supera el límite de escritura de 1 MB.");
       }
-      const target = await resolveSafePath(path, { allowMissing: true });
-      await requireApproval(
-        context,
-        `crear o reemplazar ${displayPath(target)} (${Buffer.byteLength(content)} bytes)`,
-      );
+      const root = await workDirectory(config.name);
+      const target = await resolveSafePath(path, root, { allowMissing: true });
       try {
         if ((await lstat(target)).isSymbolicLink()) {
           throw new Error("No se permite reemplazar enlaces simbólicos.");
@@ -123,23 +164,25 @@ export function createFileToolHandlers() {
       return `Archivo guardado: ${displayPath(target)}.`;
     },
     delete_file: async ({ path }, context) => {
-      const target = await resolveSafePath(path);
-      await requireApproval(context, `eliminar ${displayPath(target)}`);
+      requireAdmin(context);
+      const root = await workDirectory(config.name);
+      const target = await resolveSafePath(path, root);
       if (!(await stat(target)).isFile()) throw new Error("Solo se pueden eliminar archivos, no carpetas.");
       await unlink(target);
       return `Archivo eliminado: ${displayPath(target)}.`;
     },
     send_file: async ({ path, caption = "" }, context) => {
+      requireAdmin(context);
       if (typeof context?.sendFile !== "function") {
         throw new Error("El envío de archivos solo está disponible en una conversación de WhatsApp.");
       }
-      const target = await resolveSafePath(path);
+      const root = await workDirectory(config.name);
+      const target = await resolveSafePath(path, root);
       const info = await stat(target);
       if (!info.isFile()) throw new Error("Solo se pueden enviar archivos, no carpetas.");
       if (info.size > maxTransferBytes) {
         throw new Error(`El archivo supera el límite de envío de ${formatBytes(maxTransferBytes)}.`);
       }
-      await requireApproval(context, `enviar por WhatsApp ${displayPath(target)} (${formatBytes(info.size)})`);
       const buffer = await readFile(target);
       await context.sendFile({
         buffer,
@@ -149,27 +192,42 @@ export function createFileToolHandlers() {
       });
       return `Archivo enviado por WhatsApp: ${basename(target)}.`;
     },
+    manage_ignored_number: async ({ action, number }, context) => {
+      requireAdmin(context);
+      if (action === "list") {
+        const ignored = await readIgnoredNumbers(paths);
+        return ignored.length ? ignored.join("\n") : "Ignore.txt no contiene números.";
+      }
+      return changeIgnoredNumber(paths, number, action, getConfiguredAdminNumbers(config));
+    },
+    read_client_instructions: async (_args, context) => {
+      requireAdmin(context);
+      return (await readCustomerInstructions(paths)) || "Instrucciones.txt está vacío.";
+    },
+    write_client_instructions: async ({ content }, context) => {
+      requireAdmin(context);
+      return updateCustomerInstructions(paths, content);
+    },
   };
 }
 
-export async function saveIncomingFile({ buffer, fileName, inboxDirectory }) {
+export async function saveIncomingFile({ buffer, fileName, workDir }) {
   if (!Buffer.isBuffer(buffer)) throw new Error("El adjunto recibido no contiene datos válidos.");
   if (buffer.length > maxTransferBytes) {
     throw new Error(`El archivo supera el límite de recepción de ${formatBytes(maxTransferBytes)}.`);
   }
+  const inboxDirectory = resolve(workDir, "WhatsApp-Inbox");
   await mkdir(inboxDirectory, { recursive: true, mode: 0o700 });
-  const canonicalHome = await realpath(homedir());
+  const documents = await realpath(resolve(homedir(), "Documents"));
+  const canonicalHome = await realpath(workDir);
+  await assertInsideRoot(documents, canonicalHome);
   const canonicalInbox = await realpath(inboxDirectory);
-  await assertInsideRoot(canonicalHome, canonicalInbox);
+  assertInsideRoot(canonicalHome, canonicalInbox);
   const safeName = sanitizeFileName(fileName);
   const target = resolve(canonicalInbox, `${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`);
-  await assertInsideRoot(canonicalHome, target);
+  assertInsideRoot(canonicalHome, target);
   await writeFile(target, buffer, { flag: "wx", mode: 0o600 });
   return target;
-}
-
-export function getInboxDirectory() {
-  return resolve(homedir(), "HarvisFiles", "inbox");
 }
 
 export function isTransferSizeAllowed(size) {
@@ -194,23 +252,23 @@ function tool(name, description, properties, required = []) {
   };
 }
 
-async function requireApproval(context, action) {
-  if (typeof context?.requestApproval !== "function") {
-    throw new Error("No hay un canal de autorización disponible; no se realizó ninguna operación.");
-  }
-  if (!(await context.requestApproval(action))) {
-    throw new Error("Operación cancelada o autorización vencida.");
+function requireAdmin(context) {
+  if (context?.role !== "admin") {
+    throw new Error("Esta operación está disponible únicamente para el administrador autenticado.");
   }
 }
 
-async function resolveSafePath(input, { allowMissing = false } = {}) {
+async function resolveSafePath(input, workRoot, { allowMissing = false } = {}) {
   if (typeof input !== "string" || !input.trim()) throw new Error("Indica una ruta de archivo.");
-  const root = await realpath(homedir());
+  const root = await realpath(workRoot);
   const requestedPath = input.trim();
-  const homeRelativePath = requestedPath === "~"
-    ? "."
-    : requestedPath.replace(/^~[\\/]/, "");
-  const target = resolve(root, homeRelativePath);
+  const target = requestedPath === "~"
+    ? root
+    : requestedPath.startsWith("~/") || requestedPath.startsWith("~\\")
+      ? resolve(homedir(), requestedPath.slice(2))
+      : isAbsolute(requestedPath)
+        ? resolve(requestedPath)
+        : resolve(root, requestedPath);
   await assertInsideRoot(root, target);
   let existing = target;
   while (true) {
@@ -238,7 +296,7 @@ async function assertInsideRoot(root, target) {
   const targetPath = resolve(target);
   const pathDifference = relative(rootPath, targetPath);
   if (pathDifference === ".." || pathDifference.startsWith(`..${sep}`) || isAbsolute(pathDifference)) {
-    throw new Error("Por seguridad, Harvis solo puede gestionar archivos dentro de tu carpeta personal.");
+    throw new Error("Por seguridad, Harvis solo puede gestionar archivos dentro de Documents/<nombre>_WorkDir.");
   }
 }
 

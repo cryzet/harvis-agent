@@ -197,6 +197,25 @@ export class InteractiveConsole {
         : "Parámetro del proveedor actualizado.";
     }
     if (target === "mcp") return this.configureMcp();
+    if (target === "instructions") {
+      const [action, ...content] = rest;
+      if (action === "show") return this.handlers.readInstructions();
+      if (action === "set" && content.length) {
+        return this.handlers.writeInstructions(content.join(" "));
+      }
+      throw new Error("Uso: /configure instructions show | set <texto>.");
+    }
+    if (target === "ignore") {
+      const [action, number] = rest;
+      if (action === "list") {
+        const numbers = await this.handlers.ignoredNumbers();
+        return numbers.length ? numbers.join("\n") : "Ignore.txt no contiene números.";
+      }
+      if (["add", "remove"].includes(action) && number) {
+        return this.handlers.changeIgnoredNumber(number, action);
+      }
+      throw new Error("Uso: /configure ignore list | add <+número> | remove <+número>.");
+    }
     if (target === "web") return this.configureWeb(rest);
     if (target === "channels" || target === "channel") {
       if (target === "channels" || !rest.length) return this.configureChannels();
@@ -206,7 +225,7 @@ export class InteractiveConsole {
       if (target === "skills" || !rest.length) return this.configureSkills();
       return this.configureSkill(rest);
     }
-    throw new Error("Uso: /configure [provider|channels|skills|web|name] ...");
+    throw new Error("Uso: /configure [provider|channels|skills|web|name|instructions|ignore] ...");
   }
 
   async configureMenu() {
@@ -221,6 +240,8 @@ export class InteractiveConsole {
       "│  4) Perfil del agente",
       "│  5) Búsqueda web y scraping",
       "│  6) MCP local",
+      "│  7) Instrucciones para clientes",
+      "│  8) Números ignorados",
       "└  0) Salir",
     ].join("\n"));
     const selection = (await this.ask("Selección: ")).trim();
@@ -231,9 +252,28 @@ export class InteractiveConsole {
       case "4": return this.configureName();
       case "5": return this.configureWeb();
       case "6": return this.configureMcp();
+      case "7": return this.configureInstructions();
+      case "8": return this.configureIgnore();
       case "0": return "Configuración sin cambios.";
       default: throw new Error("Opción inválida. Ejecuta /configure e intenta de nuevo.");
     }
+  }
+
+  async configureInstructions() {
+    const instructions = await this.handlers.readInstructions();
+    console.log(`\nInstrucciones actuales:\n${instructions || "(vacías; los clientes recibirán una respuesta genérica)"}\n`);
+    const action = (await this.ask("Escribe 'set' para reemplazarlas o Enter para volver: "))
+      .trim().toLowerCase();
+    if (action !== "set") return "Sin cambios.";
+    const content = await this.ask("Nuevas instrucciones: ");
+    if (!content.trim()) throw new Error("Las instrucciones no pueden quedar vacías.");
+    return this.handlers.writeInstructions(content);
+  }
+
+  async configureIgnore() {
+    const numbers = await this.handlers.ignoredNumbers();
+    console.log(`\nNúmeros ignorados:\n${numbers.length ? numbers.join("\n") : "(ninguno)"}\n`);
+    return "Usa /configure ignore add <+número> o /configure ignore remove <+número>.";
   }
 
   async onboard() {
@@ -804,6 +844,10 @@ export class InteractiveConsole {
       "  /configure channels                Instalar/habilitar/deshabilitar canales",
       "  /configure skills                  Crear/instalar/habilitar/deshabilitar skills",
       "  /configure name <nombre>           Cambiar el nombre del agente",
+      "  /configure instructions show       Ver instrucciones para clientes",
+      "  /configure instructions set <texto> Actualizar instrucciones para clientes",
+      "  /configure ignore list             Ver números ignorados",
+      "  /configure ignore add|remove <+número> Administrar Ignore.txt",
       "  /configure provider url <URL>      Configurar proveedor local o remoto",
       "  /configure provider model <id>     Elegir modelo",
       "  /configure provider api-key <key>  Guardar API key",

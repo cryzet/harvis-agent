@@ -54,7 +54,7 @@ export function createToolHandlers({
   searchWeb,
   scrapeWebPage,
 }) {
-  const fileHandlers = createFileToolHandlers();
+  const fileHandlers = createFileToolHandlers({ config, paths });
   return {
     list_channels: async () => getChannelStatuses(),
     list_skills: async () => listSkills(paths, config),

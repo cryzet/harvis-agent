@@ -41,6 +41,8 @@ export async function createChannel(config) {
             text: message.content,
             sender: `discord:${message.channelId}:${senderId}`,
             metadata: message,
+            role: "admin",
+            channelType: "discord",
           });
           if (answer) await message.reply(String(answer));
         } catch (error) {

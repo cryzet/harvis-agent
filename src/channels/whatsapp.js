@@ -1,16 +1,15 @@
 import { createRequire } from "node:module";
-import { randomInt } from "node:crypto";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  getInboxDirectory,
+  prepareWorkDirectory,
   isTransferSizeAllowed,
   saveIncomingFile,
   sanitizeFileName,
 } from "../file-tools.js";
+import { getConfiguredAdminNumbers, readIgnoredNumbers } from "../client-access.js";
 import {
   getInternationalPhoneNumber,
-  normalizeInternationalPhoneNumber,
 } from "../phone-number.js";
 
 export async function createChannel(config) {
@@ -46,7 +45,7 @@ export async function createChannel(config) {
   let startupReady = Promise.resolve();
   let connected = false;
   const connectionWaiters = new Set();
-  const pendingApprovals = new Map();
+  const adminNumbers = getConfiguredAdminNumbers(config);
   return {
     async start({ onMessage }) {
       const auth = await useMultiFileAuthState(config.paths.whatsappAuthDir);
@@ -109,22 +108,29 @@ export async function createChannel(config) {
             const senderNumbers = [jid, message.key.remoteJidAlt]
               .map(getInternationalPhoneNumber)
               .filter(Boolean);
-            const allowedNumbers = (config.allowFrom ?? []).flatMap((number) => {
+            const senderNumber = senderNumbers.find((number) => adminNumbers.includes(number)) ??
+              senderNumbers[0];
+            if (!senderNumber) continue;
+            const isAdmin = adminNumbers.includes(senderNumber);
+            if (!isAdmin) {
+              let ignoredNumbers;
               try {
-                return [normalizeInternationalPhoneNumber(number)];
-              } catch {
-                return [];
-              }
-            });
-            if (!senderNumbers.some((number) => allowedNumbers.includes(number))) continue;
-            try {
-              const approval = parseApprovalReply(receivedText);
-              if (approval) {
-                await handleApprovalReply(current, jid, approval);
+                ignoredNumbers = await readIgnoredNumbers(config.paths);
+              } catch (error) {
+                console.error(`No se pudo validar Ignore.txt; se ignoró el mensaje de ${senderNumber}: ${error.message}`);
                 continue;
               }
+              if (ignoredNumbers.includes(senderNumber)) continue;
+            }
+            try {
               const media = getIncomingMedia(message);
               if (!receivedText?.trim() && !media) continue;
+              if (!isAdmin && media) {
+                await current.sendMessage(jid, {
+                  text: "Por seguridad, no recibo archivos de clientes. Contacta al administrador.",
+                });
+                continue;
+              }
               let text = receivedText?.trim() ?? "";
               let attachment;
               if (media) {
@@ -134,12 +140,6 @@ export async function createChannel(config) {
                   });
                   continue;
                 }
-                const approved = await requestApproval(
-                  current,
-                  jid,
-                  `recibir y guardar "${media.fileName}" en ~/HarvisFiles/inbox`,
-                );
-                if (!approved) continue;
                 if (typeof baileys.downloadMediaMessage !== "function") {
                   throw new Error("La versión de Baileys instalada no permite descargar adjuntos.");
                 }
@@ -150,17 +150,18 @@ export async function createChannel(config) {
                   { logger, reuploadRequest: current.updateMediaMessage },
                 );
                 const fileBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+                const workDir = await prepareWorkDirectory(config.name);
                 const savedPath = await saveIncomingFile({
                   buffer: fileBuffer,
                   fileName: media.fileName,
-                  inboxDirectory: config.paths.filesInboxDir ?? getInboxDirectory(),
+                  workDir,
                 });
                 attachment = {
                   path: savedPath,
                   fileName: media.fileName,
                   mimetype: media.mimetype,
                 };
-                text = [text, `Archivo recibido y guardado: ~/HarvisFiles/inbox/${basename(savedPath)}.`]
+                text = [text, `Archivo recibido y guardado: ${savedPath}.`]
                   .filter(Boolean)
                   .join("\n");
               }
@@ -172,8 +173,10 @@ export async function createChannel(config) {
                   sender: jid,
                   metadata: message,
                   attachment,
-                  requestApproval: (action) => requestApproval(current, jid, action),
-                  sendFile: (file) => sendFile(current, jid, file),
+                  role: isAdmin ? "admin" : "client",
+                  channelType: "whatsapp",
+                  phoneNumber: senderNumber,
+                  ...(isAdmin ? { sendFile: (file) => sendFile(current, jid, file) } : {}),
                 });
               } finally {
                 await updatePresence(current, "paused", jid);
@@ -221,11 +224,6 @@ export async function createChannel(config) {
         waiter.reject(new Error("El emparejamiento de WhatsApp se canceló."));
       }
       connectionWaiters.clear();
-      for (const pending of pendingApprovals.values()) {
-        clearTimeout(pending.timer);
-        pending.resolve(false);
-      }
-      pendingApprovals.clear();
       if (!socket) return;
       socket.ev.removeAllListeners("messages.upsert");
       socket.ev.removeAllListeners("creds.update");
@@ -249,57 +247,6 @@ export async function createChannel(config) {
     } catch (error) {
       console.warn(`No se pudo actualizar la presencia de WhatsApp: ${error.message}`);
     }
-  }
-
-  async function requestApproval(current, jid, action) {
-    if (current !== socket || typeof current.sendMessage !== "function") {
-      throw new Error("WhatsApp no está conectado para solicitar autorización.");
-    }
-    const code = String(randomInt(100_000, 1_000_000));
-    let resolveRequest;
-    const result = new Promise((resolve) => { resolveRequest = resolve; });
-    const pending = {
-      jid,
-      resolve: resolveRequest,
-      timer: setTimeout(() => {
-        pendingApprovals.delete(code);
-        resolveRequest(false);
-      }, 180_000),
-    };
-    pendingApprovals.set(code, pending);
-    try {
-      await current.sendMessage(jid, {
-        text: [
-          "🔐 Harvis solicita autorización antes de acceder a un archivo.",
-          `Acción: ${action}`,
-          `Responde /aprobar ${code} o /rechazar ${code} (vence en 3 minutos).`,
-        ].join("\n"),
-      });
-    } catch (error) {
-      clearTimeout(pending.timer);
-      pendingApprovals.delete(code);
-      throw new Error(`No se pudo solicitar autorización por WhatsApp: ${error.message}`, {
-        cause: error,
-      });
-    }
-    const approved = await result;
-    if (current === socket) {
-      await current.sendMessage(jid, {
-        text: approved ? "Autorización recibida; Harvis continuará." : "Operación cancelada o autorización vencida.",
-      });
-    }
-    return approved;
-  }
-
-  async function handleApprovalReply(current, jid, { approved, code }) {
-    const pending = pendingApprovals.get(code);
-    if (!pending || pending.jid !== jid) {
-      await current.sendMessage(jid, { text: "Ese código no está activo o ya venció." });
-      return;
-    }
-    clearTimeout(pending.timer);
-    pendingApprovals.delete(code);
-    pending.resolve(approved);
   }
 
   async function sendFile(current, jid, { buffer, fileName, mimetype, caption = "" }) {
@@ -353,12 +300,6 @@ function unwrapMessageContent(message) {
       content.documentWithCaptionMessage?.message;
   }
   return content;
-}
-
-function parseApprovalReply(text) {
-  const match = String(text ?? "").trim().match(/^\/(aprobar|rechazar)\s+(\d{6})$/i);
-  if (!match) return null;
-  return { approved: match[1].toLowerCase() === "aprobar", code: match[2] };
 }
 
 async function printQr(qr, requireFromProfile) {

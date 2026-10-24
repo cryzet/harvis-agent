@@ -107,28 +107,52 @@ dependencias no forman parte de la instalación básica:
 
 | Canal | Paquete instalado | Configuración |
 | --- | --- | --- |
-| WhatsApp | `baileys` y `qrcode-terminal` | Al instalar se configura un número permitido en formato internacional y se muestra el QR de vinculación en la terminal |
+| WhatsApp | `baileys` y `qrcode-terminal` | Al instalar se configura el número administrador en formato internacional y se muestra el QR de vinculación en la terminal |
 | Telegram | `grammy` | Token de bot y autorización de usuarios por ID |
 | Discord | `discord.js` | Token de bot y autorización de usuarios por ID |
 
-### Archivos por WhatsApp
+### Administrador y atención a clientes
 
-Harvis puede recibir adjuntos y guardarlos en `~/HarvisFiles/inbox`, así como
-listar, leer, crear, reemplazar, eliminar y enviar archivos dentro de la carpeta
-personal del usuario. Cada acceso o cambio requiere una aprobación individual:
-Harvis envía por WhatsApp la acción y un código de seis dígitos; responde
-`/aprobar <código>` o `/rechazar <código>`. El código vence en tres minutos.
-Las operaciones solicitadas desde la consola muestran una confirmación local.
-Sin un canal disponible para pedir autorización, la operación se rechaza.
+El número internacional configurado para WhatsApp (`/configure channel
+whatsapp number <+código-país-número>`) es el administrador: conserva el acceso
+completo a las herramientas y puede gestionar archivos sin OTP por operación.
+Los usuarios autorizados de Telegram/Discord y la consola también se consideran
+administradores. Otros números de WhatsApp reciben respuestas de un agente
+aislado, sin herramientas, limitado a la información de `Instrucciones.txt`.
+Sus conversaciones se mantienen separadas por número y tienen un historial
+corto. Si las instrucciones están vacías, reciben una respuesta genérica.
+Los adjuntos de clientes se rechazan antes de descargarse.
 
-El acceso no puede salir de la carpeta personal, no elimina carpetas y no crea
-carpetas arbitrarias al escribir. Se admiten archivos de texto de hasta 1 MB,
-PDF/DOCX y archivos de imagen de hasta 12 MB; las transferencias de WhatsApp
-tienen un límite de 16 MB. La extracción de PDF requiere Node.js 20.16+ o
-22.3+. La lectura de imágenes requiere un modelo con soporte de visión. Los PDF
-escaneados sin capa de texto requieren OCR y no se procesan. Los archivos
-recibidos se guardan después de aprobar su recepción; leerlos, modificarlos,
-eliminarlos o reenviarlos requiere una aprobación aparte.
+`Instrucciones.txt` y `Ignore.txt` se crean en el perfil local de Harvis. Los
+números de `Ignore.txt` se escriben en formato internacional E.164, uno por
+línea; esos contactos no reciben respuesta. La consola permite consultar y
+actualizar ambos archivos:
+
+```text
+/configure instructions show
+/configure instructions set <texto para compartir con clientes>
+/configure ignore list
+/configure ignore add <+código-país-número>
+/configure ignore remove <+código-país-número>
+```
+
+El administrador también puede solicitar esas operaciones por los canales
+autorizados; los cambios de instrucciones se aplican a los siguientes mensajes.
+
+### Archivos del administrador
+
+El administrador puede listar, leer, crear, reemplazar, eliminar y enviar
+archivos dentro de `Documents/<nombre-del-agente>_WorkDir`. Los adjuntos que
+envía a Harvis se guardan en el subdirectorio `WhatsApp-Inbox` de ese directorio.
+No se descargan adjuntos enviados por clientes y las rutas de archivo no pueden
+salir del directorio de trabajo. No se eliminan carpetas ni se crean carpetas
+arbitrarias al escribir.
+
+Se admiten archivos de texto de hasta 1 MB, PDF/DOCX e imágenes de hasta 12 MB;
+las transferencias de WhatsApp tienen un límite de 16 MB. La extracción de PDF
+requiere Node.js 20.16+ o 22.3+. La lectura de imágenes requiere un modelo con
+soporte de visión. Los PDF escaneados sin capa de texto requieren OCR y no se
+procesan.
 
 ## Servicio en segundo plano
 
@@ -144,10 +168,11 @@ no arrancará automáticamente.
 servicio sin borrar esa configuración. `/restart` lo reinicia y `/quit` cierra
 solo la consola. Para vincular WhatsApp más tarde, usa
 `/configure channel whatsapp link`; el QR se muestra directamente en la
-terminal. El acceso queda limitado al teléfono configurado durante la
-instalación; se requiere un número internacional E.164 con `+` y código de país
-(por ejemplo `+14155552671`). Otros remitentes se ignoran en silencio: no se
-generan códigos OTP ni notificaciones de acceso. Para cambiar el remitente
+terminal. El acceso administrativo queda limitado al teléfono configurado
+durante la instalación; se requiere un número internacional E.164 con `+` y código de país
+(por ejemplo `+14155552671`). Otros remitentes no incluidos en `Ignore.txt`
+reciben atención limitada a `Instrucciones.txt`; no se generan códigos OTP ni
+notificaciones de acceso. Para cambiar el número administrador
 permitido, usa `/configure channel whatsapp number <+código-país-número>`.
 La API de control del servicio es autenticada, escucha únicamente en
 `127.0.0.1`, no ofrece páginas web y no expone un gateway en la red ni cambia

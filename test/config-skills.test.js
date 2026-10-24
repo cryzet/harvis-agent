@@ -41,6 +41,22 @@ test("uses a new isolated profile directory for Harvis Lite", () => {
   );
 });
 
+test("initializes profile instructions and ignore files without overwriting existing content", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harvis-client-profile-"));
+  const paths = getPaths({ APPDATA: root }, "win32");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const config = loadConfig(paths);
+  assert.equal(await readFile(paths.instructionsFile, "utf8"), "");
+  assert.equal(await readFile(paths.ignoreFile, "utf8"), "");
+
+  await writeFile(paths.instructionsFile, "Solo horario: 9 a 5.");
+  await writeFile(paths.ignoreFile, "+14155552671\n");
+  loadConfig(paths);
+  assert.equal(await readFile(paths.instructionsFile, "utf8"), "Solo horario: 9 a 5.");
+  assert.equal(await readFile(paths.ignoreFile, "utf8"), "+14155552671\n");
+  assert.equal(config.name, "Harvis");
+});
+
 test("sets the default response limit to 1000 tokens and migrates the old default", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harvis-token-limit-"));
   const paths = getPaths({ APPDATA: root }, "win32");

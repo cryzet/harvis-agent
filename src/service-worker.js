@@ -14,6 +14,7 @@ import { resolve } from "node:path";
 import { createWriteStream } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { Agent } from "./agent.js";
+import { createCustomerAgent } from "./customer-agent.js";
 import { ChannelManager } from "./channels.js";
 import { getPaths, loadConfig, saveConfig } from "./config.js";
 import { createServiceControl } from "./service-control.js";
@@ -77,11 +78,22 @@ export async function runServiceWorker() {
       : []),
   ];
   const agent = new Agent({ config, paths, handlers, tools });
+  const customerAgent = createCustomerAgent({ config, paths });
   channelManager = new ChannelManager(
     config,
     paths,
-    async ({ text, sender, requestApproval, sendFile }) =>
-      agent.reply(text, `whatsapp:${sender}`, { requestApproval, sendFile }),
+    async ({ text, sender, role, phoneNumber, sendFile, channelType }) => {
+      if (role === "client" && channelType === "whatsapp") {
+        return customerAgent.reply(text, phoneNumber ?? sender);
+      }
+      if (role !== "admin") {
+        throw new Error("El remitente no tiene un rol autorizado para este canal.");
+      }
+      return agent.reply(text, `${channelType ?? "channel"}:${sender}`, {
+        role: "admin",
+        ...(sendFile ? { sendFile } : {}),
+      });
+    },
     save,
   );
   process.once("SIGINT", () => void shutdown("SIGINT"));

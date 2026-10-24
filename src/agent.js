@@ -5,11 +5,20 @@ const maxToolIterations = 5;
 const maxConversationTurns = 12;
 
 export class Agent {
-  constructor({ config, paths, handlers, tools }) {
+  constructor({
+    config,
+    paths,
+    handlers,
+    tools,
+    systemPrompt,
+    maxHistoryTurns = maxConversationTurns,
+  }) {
     this.config = config;
     this.paths = paths;
     this.handlers = handlers;
     this.tools = tools;
+    this.systemPrompt = systemPrompt;
+    this.maxHistoryTurns = maxHistoryTurns;
     this.histories = new Map();
     this.replyQueues = new Map();
   }
@@ -29,34 +38,44 @@ export class Agent {
     if (typeof input !== "string" || !input.trim()) {
       throw new Error("Escribe un mensaje antes de enviarlo.");
     }
+    const previousTurns = this.histories.get(sessionId) ?? [];
+    const historyMessages = previousTurns.flat();
+    const systemPrompt = typeof this.systemPrompt === "function"
+      ? await this.systemPrompt({ input, sessionId, context })
+      : this.systemPrompt ?? [
+        `Eres ${this.config.name}, un agente personal local.`,
+        "Responde en el idioma del usuario. Sé claro y no inventes resultados.",
+        "Puedes crear e instalar skills y configurar canales usando las herramientas disponibles.",
+        "Pide confirmación antes de instalar paquetes; informa si la instalación debe reiniciarse.",
+        "Solo puedes gestionar archivos dentro de Documents/<nombre del agente>_WorkDir. El usuario autenticado como administrador puede operar allí sin aprobaciones OTP por archivo.",
+        "Si el usuario pide analizar un adjunto recibido, usa read_file con la ruta informada.",
+        "Las skills son instrucciones Markdown guardadas en el perfil del usuario.",
+        "Para administrar atención a clientes, consulta o actualiza Instrucciones.txt y administra Ignore.txt con las herramientas correspondientes.",
+        "Si están disponibles las herramientas web, úsalas para consultas actuales; cita los enlaces devueltos y no inventes resultados.",
+        skillInstructions(this.paths, this.config),
+      ].filter(Boolean).join("\n\n");
     const messages = [
       {
         role: "system",
-        content: [
-          `Eres ${this.config.name}, un agente personal local.`,
-          "Responde en el idioma del usuario. Sé claro y no inventes resultados.",
-          "Puedes crear e instalar skills y configurar canales usando las herramientas disponibles.",
-          "Pide confirmación antes de instalar paquetes; informa si la instalación debe reiniciarse.",
-          "Las operaciones de archivos se limitan a la carpeta personal y requieren autorización explícita antes de cada acción.",
-          "Si el usuario pide analizar un adjunto recibido, usa read_file con la ruta informada; esa herramienta pedirá autorización antes de leerlo.",
-          "Las skills son instrucciones Markdown guardadas en el perfil del usuario.",
-          "Si están disponibles las herramientas web, úsalas para consultas actuales; cita los enlaces devueltos y no inventes resultados.",
-          skillInstructions(this.paths, this.config),
-        ].filter(Boolean).join("\n\n"),
+        content: systemPrompt || "Responde de forma breve y no inventes información.",
       },
-      ...(this.histories.get(sessionId) ?? []).flat(),
+      ...historyMessages,
       { role: "user", content: input.trim() },
     ];
+    const turnStart = messages.length - 1;
 
     for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
       const response = await this.request(messages);
       const message = response.choices?.[0]?.message;
       if (!message) throw new Error("El proveedor devolvió una respuesta vacía.");
+      if (message.tool_calls?.length && !this.tools.length) {
+        throw new Error("Este agente no tiene herramientas habilitadas.");
+      }
       messages.push(message);
       if (!message.tool_calls?.length) {
         const text = extractText(message.content);
         if (!text) throw new Error("El modelo no generó texto de respuesta.");
-        this.remember(messages, sessionId);
+        this.remember(messages, sessionId, turnStart);
         return text;
       }
       for (const toolCall of message.tool_calls) {
@@ -129,8 +148,8 @@ export class Agent {
     return response.json();
   }
 
-  remember(messages, sessionId) {
-    const safeMessages = messages.slice(1).map((message) => {
+  remember(messages, sessionId, turnStart) {
+    const safeMessages = messages.slice(turnStart).map((message) => {
       if (!Array.isArray(message.content) ||
           !message.content.some((part) => part.type === "image_url")) return message;
       return {
@@ -139,7 +158,7 @@ export class Agent {
       };
     });
     const history = [...(this.histories.get(sessionId) ?? []), safeMessages]
-      .slice(-maxConversationTurns);
+      .slice(-this.maxHistoryTurns);
     this.histories.delete(sessionId);
     this.histories.set(sessionId, history);
     while (this.histories.size > 50) {
