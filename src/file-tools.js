@@ -68,8 +68,8 @@ export const fileToolDefinitions = [
   tool("delete_file", "Elimina un archivo (no una carpeta) dentro del directorio de trabajo. Disponible solo para el administrador autenticado.", {
     path: { type: "string", description: "Ruta relativa o absoluta dentro de Documents/<nombre>_WorkDir/files." },
   }, ["path"]),
-  tool("send_file", "Envía por WhatsApp un archivo del directorio de trabajo al administrador autenticado, sin OTP.", {
-    path: { type: "string", description: "Ruta relativa o absoluta dentro de Documents/<nombre>_WorkDir/files." },
+  tool("send_file", "Envía un archivo de files al administrador por el canal actual (WhatsApp, Telegram o Discord). Usa la misma ruta relativa que write_file devolvió.", {
+    path: { type: "string", description: "Nombre/ruta relativa dentro de files, por ejemplo informe.txt o inbox/whatsapp/foto.jpg. No antepongas files/." },
     caption: { type: "string", description: "Texto opcional que acompaña al archivo." },
   }, ["path"]),
   tool("manage_ignored_number", "Administra números de WhatsApp excluidos de las respuestas a clientes. Solo administrador.", {
@@ -180,7 +180,7 @@ export function createFileToolHandlers({
     send_file: async ({ path, caption = "" }, context) => {
       requireAdmin(context);
       if (typeof context?.sendFile !== "function") {
-        throw new Error("El envío de archivos solo está disponible en una conversación de WhatsApp.");
+        throw new Error("El envío de archivos solo está disponible en WhatsApp, Telegram o Discord.");
       }
       const root = await getWorkDirectory(config.name);
       const target = await resolveSafePath(path, root);
@@ -196,7 +196,7 @@ export function createFileToolHandlers({
         mimetype: mimeTypeFor(target),
         caption,
       });
-      return `Archivo enviado por WhatsApp: ${basename(target)}.`;
+      return `Archivo enviado por ${context.channelType ?? "el canal actual"}: ${basename(target)}.`;
     },
     manage_ignored_number: async ({ action, number }, context) => {
       requireAdmin(context);
@@ -228,12 +228,13 @@ export function createFileToolHandlers({
   };
 }
 
-export async function saveIncomingFile({ buffer, fileName, workDir }) {
+export async function saveIncomingFile({ buffer, fileName, workDir, channel = "whatsapp" }) {
   if (!Buffer.isBuffer(buffer)) throw new Error("El adjunto recibido no contiene datos válidos.");
   if (buffer.length > maxTransferBytes) {
     throw new Error(`El archivo supera el límite de recepción de ${formatBytes(maxTransferBytes)}.`);
   }
-  const inboxDirectory = resolve(workDir, "WhatsApp-Inbox");
+  const safeChannel = String(channel).toLowerCase().replace(/[^a-z0-9_-]/g, "") || "other";
+  const inboxDirectory = resolve(workDir, "inbox", safeChannel);
   await mkdir(inboxDirectory, { recursive: true, mode: 0o700 });
   const canonicalWorkDir = await realpath(workDir);
   const canonicalInbox = await realpath(inboxDirectory);
@@ -276,7 +277,11 @@ function requireAdmin(context) {
 async function resolveSafePath(input, workRoot, { allowMissing = false } = {}) {
   if (typeof input !== "string" || !input.trim()) throw new Error("Indica una ruta de archivo.");
   const root = await realpath(workRoot);
-  const requestedPath = input.trim();
+  let requestedPath = input.trim();
+  // Accept the commonly supplied files/<name> form while files itself is the tool root.
+  if (!isAbsolute(requestedPath) && /^files[\\/]/i.test(requestedPath)) {
+    requestedPath = requestedPath.slice(6);
+  }
   const target = requestedPath === "~"
     ? root
     : requestedPath.startsWith("~/") || requestedPath.startsWith("~\\")

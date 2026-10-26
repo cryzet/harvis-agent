@@ -155,6 +155,7 @@ export async function createChannel(config) {
                   buffer: fileBuffer,
                   fileName: media.fileName,
                   workDir,
+                  channel: "whatsapp",
                 });
                 attachment = {
                   path: savedPath,

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -5,10 +6,14 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig, getPaths, saveConfig as persistConfig } from "./config.js";
+import { join } from "node:path";
 import { createSkill, listSkills, setSkillEnabled } from "./skills.js";
 import { scrapeWebPage, searchWeb } from "./web-tools.js";
 
 const paths = getPaths();
+if (!existsSync(paths.configFile) && !existsSync(join(paths.legacyRoot, "config.json"))) {
+  throw new Error("Harvis aún no está configurado. Ejecuta npm start para elegir el nombre y completar la configuración inicial.");
+}
 const config = loadConfig(paths);
 if (!config.mcp.enabled) {
   throw new Error("El servidor MCP local está deshabilitado. Habilítalo con /configure > MCP local.");

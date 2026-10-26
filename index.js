@@ -1,7 +1,16 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { Agent } from "./src/agent.js";
 import { installChannel as installChannelPackage } from "./src/channel-installer.js";
 import { InteractiveConsole } from "./src/console.js";
-import { getPaths, loadConfig, relocateProfileForName, saveConfig } from "./src/config.js";
+import {
+  createDefaultConfig,
+  getPaths,
+  getPathsForAgentName,
+  loadConfig,
+  relocateProfileForName,
+  saveConfig,
+} from "./src/config.js";
 import { createToolHandlers, toolDefinitions } from "./src/runtime-tools.js";
 import { createSkill, listSkills, setSkillEnabled } from "./src/skills.js";
 import {
@@ -24,8 +33,13 @@ import {
   getConfiguredAdminNumbers,
 } from "./src/client-access.js";
 
-const paths = getPaths();
-let config = loadConfig(paths, { deferProviderUrlValidation: true });
+let paths = getPaths();
+const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+const hasSavedProfile = existsSync(paths.configFile) ||
+  existsSync(join(paths.legacyRoot, "config.json"));
+let config = hasSavedProfile
+  ? loadConfig(paths, { deferProviderUrlValidation: true })
+  : createDefaultConfig(process.env.HARVIS_AGENT_NAME?.trim() || "Harvis");
 let agent;
 let stopping = false;
 const terminal = new InteractiveConsole({
@@ -64,11 +78,29 @@ const terminal = new InteractiveConsole({
 });
 
 await terminal.start({ showPrompt: false, showBanner: false });
+if (!config.setupComplete) {
+  if (interactive) {
+    const name = (await terminal.ask(
+      `Nombre del agente (se usará para la carpeta de trabajo) [${config.name}]: `,
+    )).trim();
+    if (name) config.name = name;
+  }
+  if (!hasSavedProfile) {
+    paths = getPathsForAgentName(config.name);
+    config = loadConfig(paths, {
+      deferProviderUrlValidation: true,
+      initialName: config.name,
+    });
+    terminal.config = config;
+  } else if (interactive) {
+    saveConfig(config, paths);
+  }
+}
 await runStartupSetup({
   terminal,
   config,
   paths,
-  interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  interactive,
 });
 relocateProfileForName(paths, config.name);
 terminal.clearScreen();

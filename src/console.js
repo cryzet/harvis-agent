@@ -308,8 +308,6 @@ export class InteractiveConsole {
       }
     }
 
-    const name = (await this.ask(`Nombre del agente [${this.config.name}]: `)).trim();
-    if (name) this.config.name = name;
     const providerChoice = (await this.ask([
       "",
       "Modelo / autenticación",

@@ -10,7 +10,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createWriteStream } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { Agent } from "./agent.js";
@@ -34,6 +34,9 @@ let logStream;
 let ready = false;
 
 export async function runServiceWorker() {
+  if (!existsSync(paths.configFile) && !existsSync(join(paths.legacyRoot, "config.json"))) {
+    throw new Error("La configuración inicial no existe; inicia Harvis desde npm start para elegir el nombre del agente.");
+  }
   await configureLogging();
   acquireLock();
   const config = loadConfig(paths, { deferProviderUrlValidation: true });

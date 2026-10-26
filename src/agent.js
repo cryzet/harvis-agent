@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { skillInstructions } from "./skills.js";
 import { getChatCompletionsUrl } from "./provider-models.js";
 
-const maxToolIterations = 5;
+const maxToolIterations = 6;
 const maxConversationTurns = 12;
 
 export class Agent {
@@ -48,7 +48,8 @@ export class Agent {
         "Responde en el idioma del usuario. Sé claro y no inventes resultados.",
         "Puedes crear e instalar skills y configurar canales usando las herramientas disponibles.",
         "Pide confirmación antes de instalar paquetes; informa si la instalación debe reiniciarse.",
-        "La carpeta Documents/<nombre del agente>_WorkDir/config contiene configuración y módulos. La carpeta files contiene tus notas, documentos del usuario y WhatsApp-Inbox. Puedes crear notas y archivos allí sin pedir confirmación.",
+        "Si el usuario pide buscar información, crear un archivo y enviarlo, hazlo en orden: busca y verifica la información, escribe el archivo, confirma que se guardó y solo entonces envíalo. No llames herramientas que dependan unas de otras en la misma ronda.",
+        "La carpeta Documents/<nombre del agente>_WorkDir/config contiene configuración y módulos. Todas las herramientas de archivos usan como raíz Documents/<nombre del agente>_WorkDir/files: escribe rutas relativas a esa raíz (por ejemplo informe.txt, sin anteponer files/). Los adjuntos entrantes están en inbox/whatsapp, inbox/telegram o inbox/discord. Puedes crear notas y archivos allí sin pedir confirmación; usa la misma ruta que write_file devolvió para send_file.",
         "Tu personalidad se define en soul.md y puedes modificarla con write_soul. Instrucciones.txt es exclusivamente para el subbot de atención a clientes; no lo uses como notas ni como directrices propias. Solo léelo o modifícalo si el administrador te lo pide.",
         "Los adjuntos recibidos se leen antes de responder; analiza su contenido junto con el mensaje del usuario.",
         "Las skills son instrucciones Markdown guardadas en el perfil del usuario.",
@@ -67,9 +68,14 @@ export class Agent {
       userMessage,
     ];
     const turnStart = messages.length - 1;
+    let artifactRetries = 0;
+    let nonRepeatableToolHasRun = false;
+    let retryWithoutTools = false;
 
     for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
-      const response = await this.request(messages);
+      const response = await this.request(messages, {
+        toolsEnabled: !retryWithoutTools,
+      });
       const message = response.choices?.[0]?.message;
       if (!message) throw new Error("El proveedor devolvió una respuesta vacía.");
       if (message.tool_calls?.length && !this.tools.length) {
@@ -77,13 +83,34 @@ export class Agent {
       }
       messages.push(message);
       if (!message.tool_calls?.length) {
-        const text = extractText(message.content);
-        if (!text) throw new Error("El modelo no generó texto de respuesta.");
+        const rawText = extractText(message.content);
+        const text = cleanAssistantText(rawText);
+        if (!text && hasOnlyUnusedTokens(rawText) && artifactRetries === 0) {
+          artifactRetries += 1;
+          retryWithoutTools = nonRepeatableToolHasRun;
+          messages.push({
+            role: "user",
+            content: "La respuesta anterior contenía marcadores internos del modelo. Continúa con una respuesta normal, clara y en español; no repitas esos marcadores.",
+          });
+          continue;
+        }
+        if (!text) {
+          throw new Error(hasOnlyUnusedTokens(rawText)
+            ? "El proveedor volvió a devolver marcadores internos (<unused…>) en vez de una respuesta. Revisa el modelo o su configuración de Chat Completions."
+            : "El modelo no generó texto de respuesta.");
+        }
         this.remember(messages, sessionId, turnStart);
         return text;
       }
+      if (retryWithoutTools) {
+        throw new Error("El proveedor intentó ejecutar herramientas durante la recuperación de una respuesta inválida.");
+      }
       for (const toolCall of message.tool_calls) {
         const name = toolCall.function?.name;
+        if (["send_file", "delete_file", "create_skill", "install_skill", "install_channel"]
+          .includes(name)) {
+          nonRepeatableToolHasRun = true;
+        }
         const handler = this.handlers[name];
         let result;
         try {
@@ -155,7 +182,7 @@ export class Agent {
     };
   }
 
-  async request(messages) {
+  async request(messages, { toolsEnabled = true } = {}) {
     const { baseUrl, model, apiKey, temperature, maxTokens, name } = this.config.provider;
     if (!model.trim()) {
       throw new Error("No hay un modelo configurado. Usa /configure provider model <id>.");
@@ -174,7 +201,7 @@ export class Agent {
         messages,
         temperature,
         max_tokens: maxTokens,
-        tools: this.tools.length ? this.tools : undefined,
+        tools: toolsEnabled && this.tools.length ? this.tools : undefined,
       }),
       signal: AbortSignal.timeout(600_000),
     });
@@ -190,6 +217,13 @@ export class Agent {
 
   remember(messages, sessionId, turnStart) {
     const safeMessages = messages.slice(turnStart).map((message) => {
+      if (message.role === "assistant" && typeof message.content === "string" &&
+          /<unused\d+>/i.test(message.content)) {
+        return {
+          ...message,
+          content: cleanAssistantText(message.content) || "[Respuesta inválida del proveedor omitida.]",
+        };
+      }
       if (!Array.isArray(message.content) ||
           !message.content.some((part) => part.type === "image_url")) return message;
       return {
@@ -219,4 +253,13 @@ function extractText(content) {
     .map((part) => part.text ?? "")
     .join("\n")
     .trim();
+}
+
+function cleanAssistantText(text) {
+  return text.replace(/<unused\d+>/gi, "").trim();
+}
+
+function hasOnlyUnusedTokens(text) {
+  return /<unused\d+>/i.test(text) &&
+    text.replace(/<unused\d+>/gi, "").replace(/[\s.,!?;:|]+/g, "").length === 0;
 }

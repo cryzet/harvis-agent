@@ -8,9 +8,11 @@ import {
   unlinkSync,
   writeFileSync,
   cpSync,
+  rmSync,
+  lstatSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { ensureClientProfileFilesSync } from "./client-access.js";
 
 const defaults = {
@@ -22,7 +24,7 @@ const defaults = {
     model: "",
     apiKey: "",
     temperature: 0.2,
-    maxTokens: 1000,
+    maxTokens: 4096,
   },
   channels: [{ type: "console", enabled: true }],
   skills: {},
@@ -36,12 +38,31 @@ const defaults = {
   },
 };
 
+export function createDefaultConfig(name = defaults.name) {
+  return {
+    ...defaults,
+    name,
+    provider: { ...defaults.provider },
+    channels: defaults.channels.map((channel) => ({ ...channel })),
+    skills: {},
+    mcp: { ...defaults.mcp },
+    web: { ...defaults.web },
+  };
+}
+
+export function getPathsForAgentName(name, env = process.env, platform = process.platform) {
+  const documents = join(env.USERPROFILE || env.HOME || env.APPDATA || homedir(), "Documents");
+  const workRoot = join(documents, `${sanitizeAgentName(name)}_WorkDir`);
+  return getPaths({ ...env, HARVIS_HOME: workRoot }, platform);
+}
+
 export function getPaths(env = process.env, platform = process.platform) {
   const legacyRoot = platform === "win32"
     ? join(env.APPDATA || join(homedir(), "AppData", "Roaming"), "HarvisLite")
     : join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "harvis-lite");
   const documents = join(env.USERPROFILE || env.HOME || env.APPDATA || homedir(), "Documents");
   const legacyConfig = join(legacyRoot, "config.json");
+  const bootstrapConfig = join(legacyRoot, "config", "config.json");
   let agentName = "Harvis";
   if (existsSync(legacyConfig)) {
     try { agentName = JSON.parse(readFileSync(legacyConfig, "utf8")).name || agentName; } catch {}
@@ -66,12 +87,16 @@ export function getPaths(env = process.env, platform = process.platform) {
       else throw new Error("Hay varios perfiles Harvis en Documents. Define HARVIS_HOME con la carpeta del agente que quieres iniciar.");
     } else if (candidates.length === 1) workRoot = candidates[0];
     else if (candidates.length > 1) throw new Error("Hay varios perfiles Harvis en Documents. Define HARVIS_HOME con la carpeta del agente que quieres iniciar.");
+    else if (existsSync(bootstrapConfig)) workRoot = legacyRoot;
+  } else if (!env.HARVIS_HOME && existsSync(bootstrapConfig)) {
+    workRoot = legacyRoot;
   }
   const root = join(workRoot, "config");
   const filesDir = join(workRoot, "files");
   return {
     root,
     workRoot,
+    documentsRoot: documents,
     filesDir,
     legacyRoot,
     configFile: join(root, "config.json"),
@@ -87,7 +112,10 @@ export function getPaths(env = process.env, platform = process.platform) {
   };
 }
 
-export function loadConfig(paths = getPaths(), { deferProviderUrlValidation = false } = {}) {
+export function loadConfig(paths = getPaths(), {
+  deferProviderUrlValidation = false,
+  initialName = defaults.name,
+} = {}) {
   migrateLegacyProfile(paths);
   mkdirSync(paths.root, { recursive: true, mode: 0o700 });
   mkdirSync(paths.filesDir, { recursive: true, mode: 0o700 });
@@ -98,7 +126,7 @@ export function loadConfig(paths = getPaths(), { deferProviderUrlValidation = fa
   if (!existsSync(paths.soulFile)) {
     writeFileSync(paths.soulFile, "Eres un asistente personal local, útil, claro y prudente. Responde en el idioma del usuario.\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
   }
-  if (!existsSync(paths.configFile)) saveConfig(defaults, paths);
+  if (!existsSync(paths.configFile)) saveConfig(createDefaultConfig(initialName), paths);
 
   let stored;
   try {
@@ -117,7 +145,10 @@ export function loadConfig(paths = getPaths(), { deferProviderUrlValidation = fa
     mcp: { ...defaults.mcp, ...stored.mcp },
     web: { ...defaults.web, ...stored.web },
   };
-  if (config.provider.maxTokens === 1024) config.provider.maxTokens = 1000;
+  if (config.provider.maxTokens === 1024 || config.provider.maxTokens === 1000) {
+    config.provider.maxTokens = defaults.provider.maxTokens;
+    saveConfig(config, paths);
+  }
   config.provider.baseUrl = process.env.OPENAI_BASE_URL || config.provider.baseUrl;
   config.provider.model = process.env.OPENAI_MODEL || config.provider.model;
   config.provider.apiKey = process.env.OPENAI_API_KEY || config.provider.apiKey;
@@ -140,18 +171,95 @@ export function loadConfig(paths = getPaths(), { deferProviderUrlValidation = fa
 export function relocateProfileForName(paths, name) {
   const safeName = String(name || "Harvis").trim()
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/g, "").slice(0, 80) || "Harvis";
-  const expectedRoot = join(dirname(paths.workRoot), `${safeName}_WorkDir`);
-  if (expectedRoot === paths.workRoot) return paths;
+  const expectedRoot = join(paths.documentsRoot ?? join(dirname(paths.workRoot), "Documents"), `${safeName}_WorkDir`);
   const destination = getPaths({ ...process.env, HARVIS_HOME: expectedRoot });
-  if (existsSync(destination.configFile)) {
+  if (expectedRoot !== paths.workRoot && existsSync(destination.configFile)) {
     throw new Error(`Ya existe una carpeta de trabajo para "${safeName}" con otra configuración: ${expectedRoot}`);
   }
-  mkdirSync(destination.root, { recursive: true, mode: 0o700 });
-  mkdirSync(destination.filesDir, { recursive: true, mode: 0o700 });
-  if (existsSync(paths.root)) copyMissing(paths.root, destination.root);
-  if (existsSync(paths.filesDir)) copyMissing(paths.filesDir, destination.filesDir);
-  Object.assign(paths, destination);
+  if (expectedRoot !== paths.workRoot && dirname(paths.workRoot) === paths.documentsRoot &&
+      existsSync(paths.workRoot) && !existsSync(expectedRoot)) {
+    renameSync(paths.workRoot, expectedRoot);
+    Object.assign(paths, destination);
+  } else if (expectedRoot !== paths.workRoot) {
+    mkdirSync(destination.root, { recursive: true, mode: 0o700 });
+    mkdirSync(destination.filesDir, { recursive: true, mode: 0o700 });
+    if (existsSync(paths.root)) copyMissing(paths.root, destination.root);
+    if (existsSync(paths.filesDir)) copyMissing(paths.filesDir, destination.filesDir);
+    Object.assign(paths, destination);
+  }
+  removeLegacyHarvisWorkDirectory(paths, expectedRoot);
   return paths;
+}
+
+function removeLegacyHarvisWorkDirectory(paths, expectedRoot) {
+  const documentsRoot = resolve(paths.documentsRoot ?? join(dirname(expectedRoot), "Documents"));
+  const legacyRoot = resolve(documentsRoot, "Harvis_WorkDir");
+  const activeRoot = resolve(expectedRoot);
+  if (!existsSync(legacyRoot)) return;
+  if (dirname(legacyRoot) !== documentsRoot || basename(legacyRoot) !== "Harvis_WorkDir") {
+    throw new Error("Se rechazó limpiar una carpeta de trabajo heredada fuera de Documents.");
+  }
+
+  if (legacyRoot === activeRoot) {
+    if (!existsSync(paths.configFile)) throw new Error("No se limpió la carpeta de trabajo porque el perfil aún no está guardado.");
+    consolidateWorkDirectory(paths, legacyRoot);
+    return;
+  }
+
+  mkdirSync(paths.root, { recursive: true, mode: 0o700 });
+  mkdirSync(paths.filesDir, { recursive: true, mode: 0o700 });
+  const legacyConfig = join(legacyRoot, "config");
+  const legacyFiles = join(legacyRoot, "files");
+  if (existsSync(legacyConfig)) {
+    copyPreserving(legacyConfig, paths.root);
+    if (existsSync(legacyFiles)) copyPreserving(legacyFiles, paths.filesDir);
+    for (const entry of readdirSync(legacyRoot, { withFileTypes: true })) {
+      if (entry.name === "config" || entry.name === "files") continue;
+      const source = join(legacyRoot, entry.name);
+      const target = join(paths.filesDir, entry.name);
+      copyPreserving(source, target);
+    }
+  } else {
+    copyPreserving(legacyRoot, paths.filesDir);
+  }
+  if (!existsSync(paths.configFile)) {
+    throw new Error("No se eliminó Harvis_WorkDir porque el perfil final aún no está guardado.");
+  }
+  rmSync(legacyRoot, { recursive: true, force: true });
+}
+
+function consolidateWorkDirectory(paths, workRoot) {
+  const configEntries = new Set([
+    "config.json", "package.json", "node_modules", "channels", "skills",
+    "whatsapp-auth", "Instrucciones.txt", "Ignore.txt", "soul.md",
+    "service.json", "service.lock", "service.log",
+  ]);
+  for (const entry of readdirSync(workRoot, { withFileTypes: true })) {
+    if (entry.name === "config" || entry.name === "files") continue;
+    const source = join(workRoot, entry.name);
+    const destination = join(configEntries.has(entry.name) ? paths.root : paths.filesDir, entry.name);
+    copyPreserving(source, destination);
+    rmSync(source, { recursive: true, force: true });
+  }
+}
+
+function copyPreserving(source, destination) {
+  if (!existsSync(destination)) {
+    cpSync(source, destination, { recursive: true, force: false });
+    return;
+  }
+  if (lstatSync(source).isDirectory() && lstatSync(destination).isDirectory()) {
+    for (const entry of readdirSync(source, { withFileTypes: true })) {
+      copyPreserving(join(source, entry.name), join(destination, entry.name));
+    }
+    return;
+  }
+  if (lstatSync(source).isFile() && lstatSync(destination).isFile() &&
+      readFileSync(source).equals(readFileSync(destination))) return;
+  let alternate = `${destination}.from-Harvis`;
+  let suffix = 2;
+  while (existsSync(alternate)) alternate = `${destination}.from-Harvis-${suffix++}`;
+  cpSync(source, alternate, { recursive: true, force: false });
 }
 
 function copyMissing(source, destination) {
@@ -183,9 +291,9 @@ function migrateLegacyProfile(paths) {
     const newInbox = join(paths.filesDir, "WhatsApp-Inbox");
     if (existsSync(oldInbox) && !existsSync(newInbox)) cpSync(oldInbox, newInbox, { recursive: true, force: false });
   }
-  const previousWorkRoot = join(dirname(paths.workRoot), "Harvis_WorkDir");
+  const previousWorkRoot = join(paths.documentsRoot ?? join(dirname(paths.workRoot), "Documents"), "Harvis_WorkDir");
   if (previousWorkRoot !== paths.workRoot && existsSync(previousWorkRoot) &&
-      !existsSync(join(previousWorkRoot, "config", "config.json"))) {
+      !existsSync(join(previousWorkRoot, "config"))) {
     mkdirSync(paths.filesDir, { recursive: true, mode: 0o700 });
     for (const entry of readdirSync(previousWorkRoot, { withFileTypes: true })) {
       if (entry.name === "config" || entry.name === "files") continue;

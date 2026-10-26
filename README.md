@@ -2,8 +2,8 @@
 
 Agente personal local para Windows, macOS y Linux. Toma como referencia la
 experiencia operativa de OpenClaw —configuración guiada, canales, skills y
-herramientas— con un único proceso Node.js, sin gateway de red ni Docker.
-Incluye consola interactiva, proveedores compatibles con OpenAI, WhatsApp,
+herramientas— con consola y servicio locales en Node.js, sin gateway de red ni
+Docker. Incluye proveedores compatibles con OpenAI, WhatsApp,
 Telegram, Discord, skills Markdown y servidor MCP local por stdio.
 
 Harvis Lite es una implementación independiente; no carga plugins de OpenClaw,
@@ -26,31 +26,41 @@ npm start
 ```
 
 En Windows también puedes ejecutar `iniciar-harvis.bat`. En la primera
-ejecución aparece el asistente QuickStart / Manual setup; en las siguientes,
-usa `/configure` para volver a abrir los menús. Ejecuta `/help` para ver todos
-los comandos.
+ejecución interactiva, Harvis pide primero el nombre y luego abre el asistente
+QuickStart / Manual setup; en las siguientes, usa `/configure` para volver a
+abrir los menús. Ejecuta `/help` para ver todos los comandos. En una ejecución
+sin terminal interactiva, `HARVIS_AGENT_NAME` permite indicar el nombre inicial;
+si no está definida, se usa `Harvis`.
 
-Los datos se guardan juntos en `Documents/<nombre del agente>_WorkDir`, donde
-el nombre corresponde al elegido durante la primera configuración. `config/`
-contiene el perfil, las credenciales, skills, módulos y canales instalados;
-`files/` contiene archivos del usuario, temporales y el inbox de WhatsApp.
-`HARVIS_HOME` permite elegir otra carpeta de trabajo. En el primer inicio, los
-perfiles anteriores de Harvis Lite y los archivos de `Harvis_WorkDir` se copian
-a la nueva estructura.
+El perfil de trabajo final está en `Documents/<nombre del agente>_WorkDir`; el
+nombre es el que se elige durante la primera configuración. Su estructura es:
+
+```text
+<nombre del agente>_WorkDir/
+├── config/   configuración, credenciales, skills, canales y módulos
+└── files/    notas, documentos e inbox de canales
+```
+
+En una instalación nueva, Harvis pide primero el nombre del agente y crea
+directamente esa carpeta de trabajo antes de continuar con el asistente. No
+crea un perfil provisional. Si encuentra un perfil antiguo de Harvis Lite, lo
+migra a `config/`; si encuentra `Documents/Harvis_WorkDir`, pasa su contenido a
+la estructura final y elimina esa carpeta después de guardar el perfil.
 
 ## Configuración
 
 En una instalación nueva se inicia un asistente guiado, inspirado en el flujo
 de onboarding de OpenClaw:
 
-1. Elige **QuickStart** (configuración breve recomendada) o **Manual setup**
-   (muestra las notas completas de seguridad) y define el nombre del agente.
+1. Define el nombre del agente; Harvis crea en ese momento su carpeta de
+   trabajo. Después elige **QuickStart** (configuración breve recomendada) o
+   **Manual setup** (muestra las notas completas de seguridad).
 2. Configura el proveedor, URL, modelo y API key (LM Studio, OpenAI o endpoint
    compatible). Puedes probar la conexión antes de continuar.
 3. Instala uno o más canales (WhatsApp, Telegram o Discord). Después de cada
    instalación, Harvis pregunta si quieres vincular o configurar el canal en ese
-   momento. WhatsApp solicita el número administrador y muestra el QR si aceptas;
-   Telegram y Discord solicitan el token del bot.
+   momento. Si aceptas WhatsApp, solicita el número administrador y muestra el
+   QR. Para Telegram o Discord, solicita el token del bot.
 4. Crea una skill Markdown local o instala una publicada en npm.
 5. Configura búsqueda en tiempo real con DuckDuckGo (sin API key) o Brave Search
    (requiere API key), y habilita o deshabilita la extracción de páginas web.
@@ -68,20 +78,22 @@ Al configurar LM Studio, Harvis consulta primero `GET /api/v1/models`, que
 devuelve los modelos instalados, y muestra los modelos de tipo LLM usando su
 identificador `key`. Si el servidor no ofrece la API nativa, prueba el endpoint
 compatible `GET /v1/models`. Para otros proveedores compatibles consulta
-`/models` bajo la URL configurada. La última opción permite introducir el ID
-manualmente; los errores de conexión o autenticación se informan. Para chat,
+`/models` bajo la URL configurada. Cada consulta de modelos tiene un límite de
+20 segundos. La última opción permite introducir el ID manualmente; los errores
+de conexión o autenticación se informan. Para chat,
 si la URL de LM Studio es solo el host o termina en `/api/v1`, Harvis la
 normaliza al endpoint compatible `/v1/chat/completions`. Las respuestas del
-agente y la prueba de conexión permiten hasta 1000 tokens de salida. Cada
-solicitud al proveedor espera hasta 10 minutos, para permitir que un modelo local
-termine de cargar y generar su respuesta. Los perfiles que usaban el límite
-predeterminado anterior de 1024 tokens se actualizan automáticamente a 1000.
+agente usan el límite de salida configurado, que por defecto es 4096 tokens; la
+prueba de conexión solicita hasta 1000. Los perfiles con los límites
+predeterminados anteriores de 1000 o 1024 tokens se actualizan automáticamente
+a 4096. Las solicitudes de chat y la prueba de conexión esperan hasta 10 minutos
+para permitir que un modelo cargue y responda.
 
-`/configure` abre el menú de secciones **Modelo / autenticación**, **Canales**,
-**Skills**, **Perfil del agente**, **Búsqueda web y scraping** y **MCP local**,
-con submenús de instalación, credenciales y permisos. El asistente de proveedor
-ofrece LM Studio, OpenAI y un endpoint personalizado. También se admiten
-comandos directos:
+`/configure` abre las secciones **Modelo / autenticación**, **Canales**,
+**Skills**, **Perfil del agente**, **Búsqueda web y scraping**, **MCP local**,
+**Instrucciones para clientes** y **Números ignorados**. El asistente de
+proveedor ofrece LM Studio, OpenAI y un endpoint personalizado. También se
+admiten comandos directos:
 
 ```text
 /configure provider url http://127.0.0.1:1234/v1
@@ -95,16 +107,19 @@ comandos directos:
 Para proveedores remotos, configura su URL compatible con OpenAI, modelo y API
 key. Las variables `OPENAI_BASE_URL`, `OPENAI_MODEL` y `OPENAI_API_KEY`
 prevalecen sobre los valores del perfil. `/models` consulta el endpoint
-configurado.
+configurado. Los tokens de Telegram y Discord también pueden proporcionarse con
+`HARVIS_TELEGRAM_BOT_TOKEN` y `HARVIS_DISCORD_BOT_TOKEN`; la clave de Brave
+admite `HARVIS_BRAVE_SEARCH_API_KEY`.
 
 La búsqueda está disponible como herramienta `web_search` del agente. DuckDuckGo
 no requiere cuenta ni clave; Brave requiere una API key que también puede
 proporcionarse con `HARVIS_BRAVE_SEARCH_API_KEY`. La herramienta
 `web_scrape` extrae texto de una URL pública, no ejecuta scripts y limita cada
-descarga a 2 MB y 10 segundos, con un máximo de cuatro solicitudes por
-redirecciones. Solo permite HTTP/HTTPS,
-rechaza hosts/IP privados y vuelve a validar cada destino de redirección. Los
-cambios en herramientas web se aplican al ejecutar `/restart`.
+descarga a 2 MB. Solo permite HTTP/HTTPS, rechaza hosts e IP privados y vuelve
+a validar cada destino de redirección. La resolución DNS y cada descarga tienen
+un límite de 10 segundos; se permiten hasta tres redirecciones (cuatro
+solicitudes como máximo). Las búsquedas esperan hasta 15 segundos. Los cambios
+en herramientas web se aplican al ejecutar `/restart`.
 
 ## Canales
 
@@ -129,10 +144,10 @@ Sus conversaciones se mantienen separadas por número y tienen un historial
 corto. Si las instrucciones están vacías, reciben una respuesta genérica.
 Los adjuntos de clientes se rechazan antes de descargarse.
 
-`config/Instrucciones.txt` y `config/Ignore.txt` se crean en el perfil local de Harvis. Los
-números de `Ignore.txt` se escriben en formato internacional E.164, uno por
-línea; esos contactos no reciben respuesta. La consola permite consultar y
-actualizar ambos archivos:
+`config/Instrucciones.txt` y `config/Ignore.txt` guardan las instrucciones del
+subbot y los números excluidos. Los números se escriben en formato internacional
+E.164, uno por línea; esos contactos no reciben respuesta. La consola permite
+consultar y actualizar ambos archivos:
 
 ```text
 /configure instructions show
@@ -149,19 +164,26 @@ autorizados; los cambios de instrucciones se aplican a los siguientes mensajes.
 
 El administrador puede listar, leer, crear, reemplazar, eliminar y enviar
 archivos dentro de `Documents/<nombre-del-agente>_WorkDir/files`. El agente puede
-crear notas allí sin pedir confirmación. Los adjuntos recibidos por WhatsApp se
-guardan en `files/WhatsApp-Inbox` y el agente puede leerlos para responder. No
-se descargan adjuntos enviados por clientes y las rutas no pueden salir de
-`files/`. Las herramientas no eliminan carpetas ni crean carpetas arbitrarias.
+crear notas allí sin pedir confirmación. Todas las herramientas (`list_files`,
+`read_file`, `write_file`, `delete_file` y `send_file`) usan como raíz la carpeta
+`files`; sus rutas son relativas a ella (por ejemplo `informe.txt`, no
+`files/informe.txt`). Los adjuntos de administradores recibidos por WhatsApp,
+Telegram y Discord se guardan respectivamente en `files/inbox/whatsapp`,
+`files/inbox/telegram` y `files/inbox/discord`, y quedan disponibles para lectura
+y envío mediante su ruta relativa. `send_file` responde por el canal en que se
+solicitó. Los adjuntos enviados por clientes de WhatsApp se rechazan antes de
+descargarse. Las rutas no pueden salir de `files/`; las herramientas no eliminan
+carpetas ni crean carpetas arbitrarias al escribir.
 
-`config/soul.md` contiene la personalidad del agente principal. El administrador
-puede pedirle que la lea o la modifique. `config/Instrucciones.txt` pertenece
-exclusivamente al subbot de atención a clientes: el agente principal solo lo
-consulta o modifica cuando el administrador se lo pide, y no lo usa como notas
-ni como directrices propias.
+`config/soul.md` contiene la personalidad del agente principal y este puede
+leerla o modificarla. `config/Instrucciones.txt` pertenece exclusivamente al
+subbot de atención a clientes: el agente principal no la usa como notas ni como
+directrices propias, y solo la lee o modifica cuando el administrador se lo
+pide.
 
 Se admiten archivos de texto de hasta 1 MB, PDF/DOCX e imágenes de hasta 12 MB;
-las transferencias de WhatsApp tienen un límite de 16 MB. La extracción de PDF
+las transferencias de archivos por WhatsApp, Telegram y Discord tienen un límite
+de 16 MB. La extracción de PDF
 requiere Node.js 20.16+ o 22.3+. La lectura de imágenes requiere un modelo con
 soporte de visión. Los PDF escaneados sin capa de texto requieren OCR y no se
 procesan.
@@ -174,7 +196,8 @@ una tarea del usuario actual en el Programador de tareas; la tarea ejecuta Harvi
 con permisos normales, no como administrador. En Linux habilita una unidad
 `systemd --user` para iniciar al iniciar sesión. Si se rechaza la autorización o
 falla el registro, el servicio puede iniciarse manualmente y Harvis explica que
-no arrancará automáticamente.
+no arrancará automáticamente. En macOS el inicio automático no está
+implementado; el servicio se puede iniciar manualmente con `/start`.
 
 `/start` inicia el servicio y habilita el inicio automático; `/stop` detiene el
 servicio sin borrar esa configuración. `/restart` lo reinicia y `/quit` cierra
@@ -241,7 +264,8 @@ al agente; el runtime no ejecuta el código del paquete como herramienta.
 ## MCP local
 
 El servidor Model Context Protocol usa el transporte stdio; no abre un puerto de
-red. Inícialo con:
+red. Completa primero la configuración con `npm start`; después puedes iniciarlo
+con:
 
 ```powershell
 npm run mcp
@@ -280,8 +304,9 @@ sistema de archivos.
 | `/restart` | Recargar configuración y canales |
 | `/quit` | Cerrar solo la consola; el servicio continúa |
 
-`/status` muestra el estado y si el proveedor está configurado, pero no imprime
-la URL, el ID del modelo ni las credenciales.
+`/status` muestra el estado del servicio, los canales y si el proveedor y el
+modelo están configurados, pero no imprime la URL, el ID del modelo ni las
+credenciales.
 
 ## Autores
 
