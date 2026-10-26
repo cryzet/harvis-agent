@@ -28,7 +28,7 @@ test("normalizes LM Studio chat URLs to the OpenAI-compatible v1 route", () => {
   );
 });
 
-test("provider verification uses a 180-second chat completion request", async (t) => {
+test("LM Studio provider verification uses a 10-minute chat completion request", async (t) => {
   const terminal = new InteractiveConsole({
     config: {
       provider: {
@@ -64,7 +64,7 @@ test("provider verification uses a 180-second chat completion request", async (t
   assert.match(JSON.parse(request.options.body).messages[0].content, /exactamente con la palabra OK/);
   assert.equal(JSON.parse(request.options.body).stream, false);
   assert.ok(request.options.signal instanceof AbortSignal);
-  assert.equal(timeout, 180_000);
+  assert.equal(timeout, 600_000);
 });
 
 test("provider verification explains when reasoning consumes the output token limit", async (t) => {

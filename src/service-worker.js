@@ -82,7 +82,7 @@ export async function runServiceWorker() {
   channelManager = new ChannelManager(
     config,
     paths,
-    async ({ text, sender, role, phoneNumber, sendFile, channelType }) => {
+    async ({ text, sender, role, phoneNumber, sendFile, channelType, attachment }) => {
       if (role === "client" && channelType === "whatsapp") {
         return customerAgent.reply(text, phoneNumber ?? sender);
       }
@@ -91,6 +91,7 @@ export async function runServiceWorker() {
       }
       return agent.reply(text, `${channelType ?? "channel"}:${sender}`, {
         role: "admin",
+        ...(attachment ? { attachment } : {}),
         ...(sendFile ? { sendFile } : {}),
       });
     },

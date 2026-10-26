@@ -75,15 +75,16 @@ export async function startService(paths, { registerAutostart = true } = {}) {
   const existing = await getServiceStatus(paths);
   if (existing.running) {
     await waitUntilReady(paths, 30_000);
-    return "El servicio de Harvis ya está en ejecución.";
+    return "El servicio ya está en ejecución.";
   }
 
   mkdirSync(dirname(paths.serviceLogFile), { recursive: true, mode: 0o700 });
-  const child = spawn(process.execPath, [workerPath, "--home", paths.root], {
+  const serviceHome = paths.workRoot ?? paths.root;
+  const child = spawn(process.execPath, [workerPath, "--home", serviceHome], {
     detached: true,
     windowsHide: true,
     stdio: "ignore",
-    env: { ...process.env, HARVIS_HOME: paths.root },
+    env: { ...process.env, HARVIS_HOME: serviceHome },
   });
   child.unref();
   child.once("error", (error) => {
@@ -91,7 +92,7 @@ export async function startService(paths, { registerAutostart = true } = {}) {
   });
 
   await waitUntilReady(paths, 30_000);
-  return "Servicio de Harvis iniciado en segundo plano.";
+  return "Servicio iniciado en segundo plano.";
 }
 
 export async function stopService(paths) {
@@ -124,11 +125,11 @@ export async function stopService(paths) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     if (!(await getServiceStatus(paths)).running && !existsSync(paths.serviceLockFile)) {
-      return "Servicio de Harvis detenido. El inicio automático sigue habilitado.";
+      return "Servicio detenido. El inicio automático sigue habilitado.";
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("El servicio de Harvis recibió la orden de detenerse, pero sigue respondiendo.");
+  throw new Error("El servicio recibió la orden de detenerse, pero sigue respondiendo.");
 }
 
 async function registerAutostartService(paths) {
@@ -147,7 +148,7 @@ async function registerAutostartService(paths) {
       const scripts = buildWindowsAutostartScripts({
         nodePath: process.execPath,
         workerPath,
-        homePath: paths.root,
+        homePath: paths.workRoot ?? paths.root,
         userName: `${process.env.USERDOMAIN || "."}\\${process.env.USERNAME}`,
       });
       await execFileAsync("powershell.exe", [
@@ -184,7 +185,7 @@ async function registerAutostartService(paths) {
       "",
       "[Service]",
       "Type=simple",
-      `Environment=${systemdQuote(`HARVIS_HOME=${paths.root}`)}`,
+      `Environment=${systemdQuote(`HARVIS_HOME=${paths.workRoot ?? paths.root}`)}`,
       `ExecStart=${systemdQuote(process.execPath)} ${systemdQuote(workerPath)}`,
       "Restart=on-failure",
       "RestartSec=5",

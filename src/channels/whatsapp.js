@@ -150,7 +150,7 @@ export async function createChannel(config) {
                   { logger, reuploadRequest: current.updateMediaMessage },
                 );
                 const fileBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-                const workDir = await prepareWorkDirectory(config.name);
+                const workDir = config.paths.filesDir ?? await prepareWorkDirectory(config.name);
                 const savedPath = await saveIncomingFile({
                   buffer: fileBuffer,
                   fileName: media.fileName,

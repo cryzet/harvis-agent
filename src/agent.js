@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { skillInstructions } from "./skills.js";
 import { getChatCompletionsUrl } from "./provider-models.js";
 
@@ -47,20 +48,23 @@ export class Agent {
         "Responde en el idioma del usuario. Sé claro y no inventes resultados.",
         "Puedes crear e instalar skills y configurar canales usando las herramientas disponibles.",
         "Pide confirmación antes de instalar paquetes; informa si la instalación debe reiniciarse.",
-        "Solo puedes gestionar archivos dentro de Documents/<nombre del agente>_WorkDir. El usuario autenticado como administrador puede operar allí sin aprobaciones OTP por archivo.",
-        "Si el usuario pide analizar un adjunto recibido, usa read_file con la ruta informada.",
+        "La carpeta Documents/<nombre del agente>_WorkDir/config contiene configuración y módulos. La carpeta files contiene tus notas, documentos del usuario y WhatsApp-Inbox. Puedes crear notas y archivos allí sin pedir confirmación.",
+        "Tu personalidad se define en soul.md y puedes modificarla con write_soul. Instrucciones.txt es exclusivamente para el subbot de atención a clientes; no lo uses como notas ni como directrices propias. Solo léelo o modifícalo si el administrador te lo pide.",
+        "Los adjuntos recibidos se leen antes de responder; analiza su contenido junto con el mensaje del usuario.",
         "Las skills son instrucciones Markdown guardadas en el perfil del usuario.",
-        "Para administrar atención a clientes, consulta o actualiza Instrucciones.txt y administra Ignore.txt con las herramientas correspondientes.",
+        `Directrices actuales de soul.md:\n${readSoul(this.paths)}`,
+        "Cuando el administrador pida cambiar la información para clientes, lee primero Instrucciones.txt con read_client_instructions; luego escribe el contenido completo revisado con write_client_instructions, preservando la información no relacionada. Nunca dejes Instrucciones.txt vacío.",
         "Si están disponibles las herramientas web, úsalas para consultas actuales; cita los enlaces devueltos y no inventes resultados.",
         skillInstructions(this.paths, this.config),
       ].filter(Boolean).join("\n\n");
+    const userMessage = await this.createUserMessage(input.trim(), context, sessionId);
     const messages = [
       {
         role: "system",
         content: systemPrompt || "Responde de forma breve y no inventes información.",
       },
       ...historyMessages,
-      { role: "user", content: input.trim() },
+      userMessage,
     ];
     const turnStart = messages.length - 1;
 
@@ -115,6 +119,42 @@ export class Agent {
     throw new Error(`El modelo excedió ${maxToolIterations} ciclos de herramientas.`);
   }
 
+  async createUserMessage(input, context, sessionId) {
+    const attachment = context.attachment;
+    if (!attachment) return { role: "user", content: input };
+    if (typeof attachment.path !== "string" || !attachment.path) {
+      throw new Error("La ruta del archivo adjunto no es válida.");
+    }
+    const readFile = this.handlers.read_file;
+    if (typeof readFile !== "function") {
+      throw new Error("No hay una herramienta disponible para leer el archivo adjunto.");
+    }
+    const result = await readFile({ path: attachment.path }, { ...context, sessionId });
+    if (result?.type === "image") {
+      return {
+        role: "user",
+        content: [
+          { type: "text", text: [input, `Imagen adjunta: ${attachment.fileName ?? attachment.path}.`].filter(Boolean).join("\n") },
+          {
+            type: "image_url",
+            image_url: { url: `data:${result.mimetype};base64,${result.data}` },
+          },
+        ],
+      };
+    }
+    if (typeof result !== "string") {
+      throw new Error("No se pudo interpretar el contenido del archivo adjunto.");
+    }
+    return {
+      role: "user",
+      content: [
+        input,
+        `Contenido del archivo adjunto (${attachment.fileName ?? attachment.path}):`,
+        result,
+      ].filter(Boolean).join("\n\n"),
+    };
+  }
+
   async request(messages) {
     const { baseUrl, model, apiKey, temperature, maxTokens, name } = this.config.provider;
     if (!model.trim()) {
@@ -136,7 +176,7 @@ export class Agent {
         max_tokens: maxTokens,
         tools: this.tools.length ? this.tools : undefined,
       }),
-      signal: AbortSignal.timeout(180_000),
+      signal: AbortSignal.timeout(600_000),
     });
     if (!response.ok) {
       const body = await response.text();
@@ -165,6 +205,11 @@ export class Agent {
       this.histories.delete(this.histories.keys().next().value);
     }
   }
+}
+
+function readSoul(paths) {
+  try { return readFileSync(paths.soulFile, "utf8").trim(); }
+  catch { return "Eres un asistente personal local, útil y claro."; }
 }
 
 function extractText(content) {

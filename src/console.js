@@ -160,7 +160,7 @@ export class InteractiveConsole {
       case "/quit":
       case "/exit":
         await this.close();
-        return "Consola cerrada. El servicio de Harvis continúa en segundo plano.";
+        return "Consola cerrada. El servicio continúa en segundo plano.";
       default: return `Comando desconocido: ${rawCommand}. Usa /help.`;
     }
   }
@@ -555,11 +555,11 @@ export class InteractiveConsole {
           temperature: 0,
           stream: false,
         }),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(600_000),
       });
     } catch (error) {
       if (error.name === "TimeoutError" || error.name === "AbortError") {
-        throw new Error("La prueba agotó 180 segundos. El modelo puede estar cargándose; espera a que LM Studio lo termine de cargar y vuelve a probar.");
+        throw new Error("La prueba agotó 600 segundos (10 minutos). El modelo puede estar cargándose; vuelve a probar cuando esté listo.");
       }
       throw new Error(`No se pudo conectar al endpoint ${endpoint}: ${error.message}`);
     }

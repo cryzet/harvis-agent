@@ -30,10 +30,13 @@ ejecución aparece el asistente QuickStart / Manual setup; en las siguientes,
 usa `/configure` para volver a abrir los menús. Ejecuta `/help` para ver todos
 los comandos.
 
-El perfil de esta versión se guarda en `%APPDATA%\HarvisLite` en Windows o
-`$XDG_CONFIG_HOME/harvis-lite` en macOS/Linux. La variable `HARVIS_HOME` permite
-elegir otra ruta. El perfil está separado del perfil antiguo de Harvis, por lo
-que no reutiliza su configuración ni sus credenciales.
+Los datos se guardan juntos en `Documents/<nombre del agente>_WorkDir`, donde
+el nombre corresponde al elegido durante la primera configuración. `config/`
+contiene el perfil, las credenciales, skills, módulos y canales instalados;
+`files/` contiene archivos del usuario, temporales y el inbox de WhatsApp.
+`HARVIS_HOME` permite elegir otra carpeta de trabajo. En el primer inicio, los
+perfiles anteriores de Harvis Lite y los archivos de `Harvis_WorkDir` se copian
+a la nueva estructura.
 
 ## Configuración
 
@@ -44,9 +47,10 @@ de onboarding de OpenClaw:
    (muestra las notas completas de seguridad) y define el nombre del agente.
 2. Configura el proveedor, URL, modelo y API key (LM Studio, OpenAI o endpoint
    compatible). Puedes probar la conexión antes de continuar.
-3. Instala y configura uno o más canales (WhatsApp, Telegram o Discord).
-   WhatsApp muestra el QR en la terminal inmediatamente después de instalarlo;
-   escanéalo antes de continuar con el resto del asistente.
+3. Instala uno o más canales (WhatsApp, Telegram o Discord). Después de cada
+   instalación, Harvis pregunta si quieres vincular o configurar el canal en ese
+   momento. WhatsApp solicita el número administrador y muestra el QR si aceptas;
+   Telegram y Discord solicitan el token del bot.
 4. Crea una skill Markdown local o instala una publicada en npm.
 5. Configura búsqueda en tiempo real con DuckDuckGo (sin API key) o Brave Search
    (requiere API key), y habilita o deshabilita la extracción de páginas web.
@@ -56,7 +60,9 @@ de onboarding de OpenClaw:
 
 El nombre elegido se utiliza como identidad del asistente en la consola: en el
 encabezado de las respuestas, el indicador de actividad, los menús y los
-mensajes de inicio. Puedes cambiarlo en **/configure > Perfil del agente**.
+mensajes de inicio. Puedes cambiar el nombre visible en **/configure > Perfil
+del agente**; la carpeta conserva el nombre elegido durante la primera
+configuración.
 
 Al configurar LM Studio, Harvis consulta primero `GET /api/v1/models`, que
 devuelve los modelos instalados, y muestra los modelos de tipo LLM usando su
@@ -67,7 +73,7 @@ manualmente; los errores de conexión o autenticación se informan. Para chat,
 si la URL de LM Studio es solo el host o termina en `/api/v1`, Harvis la
 normaliza al endpoint compatible `/v1/chat/completions`. Las respuestas del
 agente y la prueba de conexión permiten hasta 1000 tokens de salida. Cada
-solicitud al proveedor espera hasta 3 minutos, para permitir que un modelo local
+solicitud al proveedor espera hasta 10 minutos, para permitir que un modelo local
 termine de cargar y generar su respuesta. Los perfiles que usaban el límite
 predeterminado anterior de 1024 tokens se actualizan automáticamente a 1000.
 
@@ -107,9 +113,9 @@ dependencias no forman parte de la instalación básica:
 
 | Canal | Paquete instalado | Configuración |
 | --- | --- | --- |
-| WhatsApp | `baileys` y `qrcode-terminal` | Al instalar se configura el número administrador en formato internacional y se muestra el QR de vinculación en la terminal |
-| Telegram | `grammy` | Token de bot y autorización de usuarios por ID |
-| Discord | `discord.js` | Token de bot y autorización de usuarios por ID |
+| WhatsApp | `baileys` y `qrcode-terminal` | Tras instalar, puedes configurar el número administrador y vincular con QR |
+| Telegram | `grammy` | Tras instalar, puedes guardar el token del bot y conectar |
+| Discord | `discord.js` | Tras instalar, puedes guardar el token del bot y conectar |
 
 ### Administrador y atención a clientes
 
@@ -123,7 +129,7 @@ Sus conversaciones se mantienen separadas por número y tienen un historial
 corto. Si las instrucciones están vacías, reciben una respuesta genérica.
 Los adjuntos de clientes se rechazan antes de descargarse.
 
-`Instrucciones.txt` y `Ignore.txt` se crean en el perfil local de Harvis. Los
+`config/Instrucciones.txt` y `config/Ignore.txt` se crean en el perfil local de Harvis. Los
 números de `Ignore.txt` se escriben en formato internacional E.164, uno por
 línea; esos contactos no reciben respuesta. La consola permite consultar y
 actualizar ambos archivos:
@@ -142,11 +148,17 @@ autorizados; los cambios de instrucciones se aplican a los siguientes mensajes.
 ### Archivos del administrador
 
 El administrador puede listar, leer, crear, reemplazar, eliminar y enviar
-archivos dentro de `Documents/<nombre-del-agente>_WorkDir`. Los adjuntos que
-envía a Harvis se guardan en el subdirectorio `WhatsApp-Inbox` de ese directorio.
-No se descargan adjuntos enviados por clientes y las rutas de archivo no pueden
-salir del directorio de trabajo. No se eliminan carpetas ni se crean carpetas
-arbitrarias al escribir.
+archivos dentro de `Documents/<nombre-del-agente>_WorkDir/files`. El agente puede
+crear notas allí sin pedir confirmación. Los adjuntos recibidos por WhatsApp se
+guardan en `files/WhatsApp-Inbox` y el agente puede leerlos para responder. No
+se descargan adjuntos enviados por clientes y las rutas no pueden salir de
+`files/`. Las herramientas no eliminan carpetas ni crean carpetas arbitrarias.
+
+`config/soul.md` contiene la personalidad del agente principal. El administrador
+puede pedirle que la lea o la modifique. `config/Instrucciones.txt` pertenece
+exclusivamente al subbot de atención a clientes: el agente principal solo lo
+consulta o modifica cuando el administrador se lo pide, y no lo usa como notas
+ni como directrices propias.
 
 Se admiten archivos de texto de hasta 1 MB, PDF/DOCX e imágenes de hasta 12 MB;
 las transferencias de WhatsApp tienen un límite de 16 MB. La extracción de PDF
@@ -178,7 +190,7 @@ La API de control del servicio es autenticada, escucha únicamente en
 `127.0.0.1`, no ofrece páginas web y no expone un gateway en la red ni cambia
 el transporte MCP stdio. Las instalaciones de paquetes npm se autorizan desde
 la consola interactiva. El registro del servicio se guarda en `service.log`
-dentro del perfil local.
+dentro de `config/`.
 
 También están disponibles los comandos:
 
@@ -203,8 +215,9 @@ localmente; autorízalo con el comando `allow` correspondiente. WhatsApp usa
 exclusivamente la allowlist de números internacionales configurada arriba. Los
 tokens se guardan en el perfil local y no se muestran en el estado.
 
-Los canales npm externos pueden instalarse mediante el menú. El paquete debe
-exportar `createChannel(config)` y devolver un adaptador con
+Los canales npm externos pueden instalarse mediante el menú. Después de
+instalarlos, Harvis pregunta si quieres activarlos y conectarlos de inmediato.
+El paquete debe exportar `createChannel(config)` y devolver un adaptador con
 `start({ onMessage })` y `stop()`. La instalación npm requiere confirmación.
 Harvis no puede cargar directamente paquetes `@openclaw/*` que dependan del
 host OpenClaw.

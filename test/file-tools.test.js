@@ -6,9 +6,11 @@ import test from "node:test";
 import { createFileToolHandlers } from "../src/file-tools.js";
 
 async function createFixture(t) {
-  const directory = await mkdtemp(join(tmpdir(), "harvis-file-tools-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const profile = join(directory, "profile");
+  const fixtureDirectory = await mkdtemp(join(tmpdir(), "harvis-file-tools-"));
+  t.after(() => rm(fixtureDirectory, { recursive: true, force: true }));
+  const directory = join(fixtureDirectory, "work");
+  const profile = join(fixtureDirectory, "profile");
+  await mkdir(directory);
   const instructionsFile = join(profile, "Instrucciones.txt");
   const ignoreFile = join(profile, "Ignore.txt");
   await mkdir(profile);
@@ -21,7 +23,7 @@ async function createFixture(t) {
         name: "Harvis",
         channels: [{ type: "whatsapp", adminNumber: "+14155552670" }],
       },
-      paths: { instructionsFile, ignoreFile },
+      paths: { root: profile, instructionsFile, ignoreFile },
       workDirectory: async () => directory,
     }),
   };
@@ -41,6 +43,30 @@ test("file operations require the authenticated admin role and remain inside the
     /Documents\/<nombre>_WorkDir/,
   );
   assert.equal(await readFile(target, "utf8"), "contenido privado");
+});
+
+test("admin can read WhatsApp attachments from the work-directory inbox but not other profile files", async (t) => {
+  const { directory, handlers } = await createFixture(t);
+  const profile = join(directory, "..", "profile");
+  const inbox = join(directory, "WhatsApp-Inbox");
+  const attachment = join(inbox, "document.txt");
+  const privateFile = join(profile, "config.json");
+  await mkdir(inbox);
+  await writeFile(attachment, "contenido del adjunto");
+  await writeFile(privateFile, '{"secret":"no leer"}');
+
+  assert.equal(
+    await handlers.read_file({ path: attachment }, { role: "admin" }),
+    "contenido del adjunto",
+  );
+  await assert.rejects(
+    handlers.read_file({ path: privateFile }, { role: "admin" }),
+    /Documents\/<nombre>_WorkDir/,
+  );
+  await assert.rejects(
+    handlers.read_file({ path: attachment }, { role: "client" }),
+    /únicamente para el administrador autenticado/,
+  );
 });
 
 test("admin can read, write, list, delete, and send work-directory files without OTP", async (t) => {
@@ -78,6 +104,10 @@ test("admin tools update customer instructions and the ignored-number list", asy
   assert.equal(
     await handlers.read_client_instructions({}, context),
     "Atendemos de 9 a 5.",
+  );
+  await assert.rejects(
+    handlers.write_client_instructions({ content: "Información no autorizada." }, { role: "client" }),
+    /únicamente para el administrador autenticado/,
   );
   assert.match(
     await handlers.manage_ignored_number({ action: "add", number: "+14155552671" }, context),

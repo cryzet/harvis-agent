@@ -202,7 +202,8 @@ test("WhatsApp routes admin and client roles, ignores configured numbers, and re
     assert.equal(received.length, 2);
     assert.equal(received[1].role, "admin");
     assert.match(received[1].text, /Archivo recibido y guardado/);
-    assert.match(received[1].attachment.path, new RegExp(`${agentName}_WorkDir`));
+    assert.match(received[1].attachment.path, /WhatsApp-Inbox/);
+    assert.ok(received[1].attachment.path.startsWith(join(workDir, "WhatsApp-Inbox")));
     assert.equal(await readFile(received[1].attachment.path, "utf8"), "received attachment");
     assert.equal(baileys.downloadCalls, 1);
 

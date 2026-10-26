@@ -1,7 +1,7 @@
 import { Agent } from "./src/agent.js";
 import { installChannel as installChannelPackage } from "./src/channel-installer.js";
 import { InteractiveConsole } from "./src/console.js";
-import { getPaths, loadConfig, saveConfig } from "./src/config.js";
+import { getPaths, loadConfig, relocateProfileForName, saveConfig } from "./src/config.js";
 import { createToolHandlers, toolDefinitions } from "./src/runtime-tools.js";
 import { createSkill, listSkills, setSkillEnabled } from "./src/skills.js";
 import {
@@ -70,6 +70,7 @@ await runStartupSetup({
   paths,
   interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
 });
+relocateProfileForName(paths, config.name);
 terminal.clearScreen();
 await startRuntime();
 terminal.printBanner();
@@ -189,18 +190,35 @@ async function installChannel(name) {
     paths,
     save: () => saveConfig(config, paths),
   });
+  let followUp = "";
   if (packageName === "whatsapp") {
-    await configureWhatsAppNumber();
-    const linkNow = (await terminal.ask("¿Vincular WhatsApp ahora con un QR? [S/n]: "))
+    const linkNow = (await terminal.ask("¿Quieres vincular WhatsApp ahora? [S/n]: "))
       .trim().toLowerCase();
     if (!["n", "no"].includes(linkNow)) {
-      return `${result}\n${await linkWhatsApp()}`;
+      await configureWhatsAppNumber();
+      followUp = await linkWhatsApp();
     }
+  } else if (["telegram", "discord"].includes(packageName.toLowerCase())) {
+    const channelName = packageName.toLowerCase();
+    const connectNow = (await terminal.ask(`¿Quieres configurar y conectar ${channelName} ahora? [S/n]: `))
+      .trim().toLowerCase();
+    if (!["n", "no"].includes(connectNow)) {
+      const token = (await terminal.ask(`Token del bot de ${channelName}: `, { secret: true })).trim();
+      if (!token) throw new Error("El token no puede estar vacío.");
+      const channel = config.channels.find(({ type }) => type === channelName);
+      channel.token = token;
+      saveConfig(config, paths);
+      followUp = `Token guardado para ${channelName}.`;
+    }
+  } else {
+    const connectNow = (await terminal.ask("¿Quieres activar y conectar este canal ahora? [S/n]: "))
+      .trim().toLowerCase();
+    if (!["n", "no"].includes(connectNow)) followUp = "Canal listo para iniciarse.";
   }
   if (config.setupComplete && (await getServiceStatus(paths)).running) {
     await restart();
   }
-  return result;
+  return [result, followUp].filter(Boolean).join("\n");
 }
 
 async function configureWhatsAppNumber(input = "") {

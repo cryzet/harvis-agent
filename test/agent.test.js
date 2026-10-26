@@ -41,6 +41,7 @@ test("uses OpenAI-compatible provider tool calls and retains conversation", asyn
     config: {
       name: "Harvis",
       provider: {
+        name: "lmstudio",
         baseUrl: "http://127.0.0.1:1234/v1",
         model: "local-model",
         apiKey: "",
@@ -64,7 +65,7 @@ test("uses OpenAI-compatible provider tool calls and retains conversation", asyn
   assert.equal(await agent.reply("Crea una skill para planificar el día"), "Skill creada.");
   assert.equal(savedSkill, "daily");
   assert.equal(payloads[0].max_tokens, 1000);
-  assert.equal(timeout, 180_000);
+  assert.equal(timeout, 600_000);
   assert.equal(await agent.reply("Gracias"), "Claro.");
   assert.equal(payloads[0].model, "local-model");
   assert.equal(payloads[0].tools[0].function.name, "create_skill");
@@ -190,4 +191,64 @@ test("passes approved images to vision models without retaining image data in hi
   const serializedHistory = JSON.stringify(payloads[2].messages);
   assert.doesNotMatch(serializedHistory, /aW1hZ2UgYnl0ZXM=/);
   assert.match(serializedHistory, /La imagen se analizó/);
+});
+
+test("reads WhatsApp document and image attachments before sending the user message", async (t) => {
+  const skillsDir = await mkdtemp(join(tmpdir(), "harvis-attachment-agent-skills-"));
+  t.after(() => rm(skillsDir, { recursive: true, force: true }));
+  const payloads = [];
+  const readRequests = [];
+  const responses = [
+    { choices: [{ message: { role: "assistant", content: "El documento indica la fecha." } }] },
+    { choices: [{ message: { role: "assistant", content: "La imagen muestra un recibo." } }] },
+  ];
+  t.mock.method(globalThis, "fetch", async (_url, request) => {
+    payloads.push(JSON.parse(request.body));
+    return new Response(JSON.stringify(responses.shift()), { status: 200 });
+  });
+  const agent = new Agent({
+    config: {
+      name: "Harvis",
+      provider: {
+        baseUrl: "http://127.0.0.1:1234/v1",
+        model: "vision-model",
+        apiKey: "",
+        temperature: 0,
+        maxTokens: 128,
+      },
+    },
+    paths: { skillsDir },
+    handlers: {
+      read_file: async (args, context) => {
+        readRequests.push({ args, context });
+        if (args.path.endsWith("receipt.png")) {
+          return {
+            type: "image",
+            mimetype: "image/png",
+            data: Buffer.from("image bytes").toString("base64"),
+            text: "Imagen leída.",
+          };
+        }
+        return "Texto extraído: fecha 24 de octubre.";
+      },
+    },
+    tools: [{ type: "function", function: { name: "read_file" } }],
+  });
+
+  assert.equal(await agent.reply("¿Qué dice?", "whatsapp:admin", {
+    role: "admin",
+    attachment: { path: "C:\\work\\report.pdf", fileName: "report.pdf" },
+  }), "El documento indica la fecha.");
+  assert.equal(await agent.reply("¿Qué aparece?", "whatsapp:admin", {
+    role: "admin",
+    attachment: { path: "C:\\work\\receipt.png", fileName: "receipt.png" },
+  }), "La imagen muestra un recibo.");
+
+  assert.deepEqual(readRequests.map(({ args }) => args.path), [
+    "C:\\work\\report.pdf",
+    "C:\\work\\receipt.png",
+  ]);
+  assert.ok(readRequests.every(({ context }) => context.role === "admin"));
+  assert.match(payloads[0].messages.at(-1).content, /Texto extraído: fecha 24 de octubre/);
+  assert.ok(payloads[1].messages.at(-1).content.some((part) => part.type === "image_url"));
 });
