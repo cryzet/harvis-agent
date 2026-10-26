@@ -88,6 +88,12 @@ prueba de conexión solicita hasta 1000. Los perfiles con los límites
 predeterminados anteriores de 1000 o 1024 tokens se actualizan automáticamente
 a 4096. Las solicitudes de chat y la prueba de conexión esperan hasta 10 minutos
 para permitir que un modelo cargue y responda.
+El contexto se estima con una ventana predeterminada de 8192 tokens compartida
+por el agente principal y el subbot. Antes de cada solicitud, Harvis descarta
+turnos antiguos si es necesario y reduce resultados largos de herramientas; el
+límite de salida se ajusta al espacio restante. `provider.contextWindowTokens`
+puede ajustarse en `config/config.json` al tamaño configurado en el servidor del
+modelo.
 
 `/configure` abre las secciones **Modelo / autenticación**, **Canales**,
 **Skills**, **Perfil del agente**, **Búsqueda web y scraping**, **MCP local**,
@@ -144,10 +150,10 @@ Sus conversaciones se mantienen separadas por número y tienen un historial
 corto. Si las instrucciones están vacías, reciben una respuesta genérica.
 Los adjuntos de clientes se rechazan antes de descargarse.
 
-`config/Instrucciones.txt` y `config/Ignore.txt` guardan las instrucciones del
-subbot y los números excluidos. Los números se escriben en formato internacional
-E.164, uno por línea; esos contactos no reciben respuesta. La consola permite
-consultar y actualizar ambos archivos:
+`config/Instrucciones.txt` contiene las instrucciones del subbot en lenguaje
+natural. `config/Ignore.txt` contiene los números excluidos, uno por línea en
+formato internacional E.164; esos contactos no reciben respuesta. La consola
+permite consultar y actualizar ambos archivos:
 
 ```text
 /configure instructions show
@@ -159,6 +165,25 @@ consultar y actualizar ambos archivos:
 
 El administrador también puede solicitar esas operaciones por los canales
 autorizados; los cambios de instrucciones se aplican a los siguientes mensajes.
+Durante la primera configuración se crea `config/contacts.txt` con una nota de
+uso. Añade ahí los contactos privados en formato E.164, separados por coma
+(si existe un contacto técnico antiguo dentro de `Instrucciones.txt`, se migra a
+este archivo):
+
+```text
+Técnico: +14155552671, Vendedor: +14155552672
+```
+
+El agente principal puede consultar y modificar ese archivo con las herramientas
+`read_contacts` y `write_contacts`, y enviar mensajes a una etiqueta mediante
+`send_contact_message`. Si el administrador indica un número de cliente y pide
+expresamente iniciar una conversación —por ejemplo, para comunicar una oferta o
+un descuento— puede usar `send_whatsapp_message`. No inicia envíos por iniciativa
+propia. Cuando el subbot no encuentra una respuesta en
+`Instrucciones.txt`, selecciona la etiqueta más adecuada según el tema de la
+consulta y avisa a ese contacto con el número del cliente y su pregunta. El
+subbot solo recibe las etiquetas disponibles; nunca recibe los números de
+`contacts.txt` ni los revela a clientes.
 
 ### Archivos del administrador
 

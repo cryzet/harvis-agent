@@ -132,10 +132,10 @@ export class InteractiveConsole {
     const body = lines.map((line) => `│  ${line}`).join("\n");
     process.stdout.write([
       "",
-      `┌─ ${color(this.config.name)}`,
-      "│",
+      ` ${color(this.config.name)}`,
+      "",
       body,
-      "└────────────────────────────────────",
+      "",
       "",
       "",
     ].join("\n"));

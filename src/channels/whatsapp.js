@@ -10,6 +10,7 @@ import {
 import { getConfiguredAdminNumbers, readIgnoredNumbers } from "../client-access.js";
 import {
   getInternationalPhoneNumber,
+  normalizeInternationalPhoneNumber,
 } from "../phone-number.js";
 
 export async function createChannel(config) {
@@ -178,6 +179,7 @@ export async function createChannel(config) {
                   channelType: "whatsapp",
                   phoneNumber: senderNumber,
                   ...(isAdmin ? { sendFile: (file) => sendFile(current, jid, file) } : {}),
+                  sendContactMessage: (message) => sendContactMessage(current, message),
                 });
               } finally {
                 await updatePresence(current, "paused", jid);
@@ -265,6 +267,16 @@ export async function createChannel(config) {
       fileName: safeName,
       caption,
     });
+  }
+
+  async function sendContactMessage(current, { phoneNumber, text }) {
+    if (current !== socket || !connected) throw new Error("WhatsApp no está conectado.");
+    const normalized = normalizeInternationalPhoneNumber(phoneNumber);
+    if (typeof text !== "string" || !text.trim()) {
+      throw new Error("El aviso al técnico no contiene texto.");
+    }
+    const jid = `${normalized.slice(1)}@s.whatsapp.net`;
+    await current.sendMessage(jid, { text: text.slice(0, 4000) });
   }
 }
 

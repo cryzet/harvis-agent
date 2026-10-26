@@ -4,6 +4,9 @@ import { getChatCompletionsUrl } from "./provider-models.js";
 
 const maxToolIterations = 6;
 const maxConversationTurns = 12;
+const defaultContextWindowTokens = 8192;
+const contextSafetyMarginTokens = 512;
+const minimumResponseTokens = 256;
 
 export class Agent {
   constructor({
@@ -20,6 +23,11 @@ export class Agent {
     this.tools = tools;
     this.systemPrompt = systemPrompt;
     this.maxHistoryTurns = maxHistoryTurns;
+    const configuredContextWindow = Number(config.provider.contextWindowTokens);
+    this.contextWindowTokens = Number.isInteger(configuredContextWindow) &&
+      configuredContextWindow >= 1024 && configuredContextWindow <= 1_000_000
+      ? configuredContextWindow
+      : defaultContextWindowTokens;
     this.histories = new Map();
     this.replyQueues = new Map();
   }
@@ -39,8 +47,7 @@ export class Agent {
     if (typeof input !== "string" || !input.trim()) {
       throw new Error("Escribe un mensaje antes de enviarlo.");
     }
-    const previousTurns = this.histories.get(sessionId) ?? [];
-    const historyMessages = previousTurns.flat();
+    let previousTurns = (this.histories.get(sessionId) ?? []).slice(-this.maxHistoryTurns);
     const systemPrompt = typeof this.systemPrompt === "function"
       ? await this.systemPrompt({ input, sessionId, context })
       : this.systemPrompt ?? [
@@ -54,41 +61,43 @@ export class Agent {
         "Los adjuntos recibidos se leen antes de responder; analiza su contenido junto con el mensaje del usuario.",
         "Las skills son instrucciones Markdown guardadas en el perfil del usuario.",
         `Directrices actuales de soul.md:\n${readSoul(this.paths)}`,
-        "Cuando el administrador pida cambiar la información para clientes, lee primero Instrucciones.txt con read_client_instructions; luego escribe el contenido completo revisado con write_client_instructions, preservando la información no relacionada. Nunca dejes Instrucciones.txt vacío.",
+        "Cuando el administrador pida cambiar la información para clientes, lee primero Instrucciones.txt con read_client_instructions; luego escribe el contenido completo revisado con write_client_instructions, preservando la información no relacionada. Guarda los números y datos privados de contactos en contacts.txt, nunca en Instrucciones.txt.",
+        "El administrador puede ver y actualizar la lista privada config/contacts.txt mediante read_contacts y write_contacts. Antes de modificarla, léela para conservar los contactos que no se pidieron cambiar. contacts.txt no se comparte con el subbot ni con clientes.",
+        "Si el administrador pide enviar o derivar un mensaje por WhatsApp a un contacto guardado, usa read_contacts para identificar la etiqueta y send_contact_message para enviarlo. Si pide escribir a un número de cliente indicado en su solicitud, usa send_whatsapp_message. Envía solo cuando el administrador lo haya solicitado explícitamente; no envíes campañas ni mensajes proactivos por iniciativa propia.",
         "Si están disponibles las herramientas web, úsalas para consultas actuales; cita los enlaces devueltos y no inventes resultados.",
         skillInstructions(this.paths, this.config),
       ].filter(Boolean).join("\n\n");
     const userMessage = await this.createUserMessage(input.trim(), context, sessionId);
-    const messages = [
-      {
-        role: "system",
-        content: systemPrompt || "Responde de forma breve y no inventes información.",
-      },
-      ...historyMessages,
-      userMessage,
-    ];
-    const turnStart = messages.length - 1;
+    const systemMessage = {
+      role: "system",
+      content: systemPrompt || "Responde de forma breve y no inventes información.",
+    };
+    const currentTurn = [userMessage];
     let artifactRetries = 0;
     let nonRepeatableToolHasRun = false;
     let retryWithoutTools = false;
 
     for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
-      const response = await this.request(messages, {
-        toolsEnabled: !retryWithoutTools,
+      const toolsEnabled = !retryWithoutTools;
+      const context = this.fitContext(systemMessage, previousTurns, currentTurn, toolsEnabled);
+      previousTurns = context.historyTurns;
+      const response = await this.request(context.messages, {
+        toolsEnabled,
+        maxTokens: context.maxTokens,
       });
       const message = response.choices?.[0]?.message;
       if (!message) throw new Error("El proveedor devolvió una respuesta vacía.");
       if (message.tool_calls?.length && !this.tools.length) {
         throw new Error("Este agente no tiene herramientas habilitadas.");
       }
-      messages.push(message);
+      currentTurn.push(message);
       if (!message.tool_calls?.length) {
         const rawText = extractText(message.content);
         const text = cleanAssistantText(rawText);
         if (!text && hasOnlyUnusedTokens(rawText) && artifactRetries === 0) {
           artifactRetries += 1;
           retryWithoutTools = nonRepeatableToolHasRun;
-          messages.push({
+          currentTurn.push({
             role: "user",
             content: "La respuesta anterior contenía marcadores internos del modelo. Continúa con una respuesta normal, clara y en español; no repitas esos marcadores.",
           });
@@ -99,7 +108,7 @@ export class Agent {
             ? "El proveedor volvió a devolver marcadores internos (<unused…>) en vez de una respuesta. Revisa el modelo o su configuración de Chat Completions."
             : "El modelo no generó texto de respuesta.");
         }
-        this.remember(messages, sessionId, turnStart);
+        this.remember(currentTurn, sessionId, previousTurns);
         return text;
       }
       if (retryWithoutTools) {
@@ -107,7 +116,7 @@ export class Agent {
       }
       for (const toolCall of message.tool_calls) {
         const name = toolCall.function?.name;
-        if (["send_file", "delete_file", "create_skill", "install_skill", "install_channel"]
+        if (["send_file", "send_contact_message", "send_whatsapp_message", "escalate_to_contact", "delete_file", "create_skill", "install_skill", "install_channel"]
           .includes(name)) {
           nonRepeatableToolHasRun = true;
         }
@@ -122,7 +131,7 @@ export class Agent {
         } catch (error) {
           result = `Error: ${error.message}`;
         }
-        messages.push({
+        currentTurn.push({
           role: "tool",
           tool_call_id: toolCall.id,
           content: result?.type === "image"
@@ -130,7 +139,7 @@ export class Agent {
             : typeof result === "string" ? result : JSON.stringify(result),
         });
         if (result?.type === "image") {
-          messages.push({
+          currentTurn.push({
             role: "user",
             content: [
               { type: "text", text: "Imagen autorizada para analizar:" },
@@ -182,8 +191,40 @@ export class Agent {
     };
   }
 
-  async request(messages, { toolsEnabled = true } = {}) {
-    const { baseUrl, model, apiKey, temperature, maxTokens, name } = this.config.provider;
+  fitContext(systemMessage, historyTurns, currentTurn, toolsEnabled) {
+    const outputLimit = Math.min(
+      Number(this.config.provider.maxTokens) || 1000,
+      this.contextWindowTokens - minimumResponseTokens - contextSafetyMarginTokens,
+    );
+    const promptLimit = this.contextWindowTokens - outputLimit - contextSafetyMarginTokens;
+    let retainedTurns = [...historyTurns];
+    const tools = toolsEnabled ? this.tools : [];
+    const estimate = () => estimatePromptTokens(
+      [systemMessage, ...retainedTurns.flat(), ...currentTurn],
+      tools,
+    );
+
+    while (retainedTurns.length && estimate() > promptLimit) retainedTurns.shift();
+    if (estimate() > promptLimit) compactCurrentTurn(currentTurn);
+
+    const messages = [systemMessage, ...retainedTurns.flat(), ...currentTurn];
+    const promptTokens = estimatePromptTokens(messages, tools);
+    const availableTokens = this.contextWindowTokens - promptTokens - contextSafetyMarginTokens;
+    if (availableTokens < minimumResponseTokens) {
+      throw new Error(
+        `El mensaje actual y las instrucciones ocupan aproximadamente ${promptTokens} tokens; ` +
+        `superan el contexto disponible de ${this.contextWindowTokens}. Reduce el tamaño del mensaje o de los adjuntos.`,
+      );
+    }
+    return {
+      messages,
+      historyTurns: retainedTurns,
+      maxTokens: Math.min(outputLimit, availableTokens),
+    };
+  }
+
+  async request(messages, { toolsEnabled = true, maxTokens } = {}) {
+    const { baseUrl, model, apiKey, temperature, name } = this.config.provider;
     if (!model.trim()) {
       throw new Error("No hay un modelo configurado. Usa /configure provider model <id>.");
     }
@@ -200,7 +241,7 @@ export class Agent {
         model,
         messages,
         temperature,
-        max_tokens: maxTokens,
+        max_tokens: maxTokens ?? this.config.provider.maxTokens,
         tools: toolsEnabled && this.tools.length ? this.tools : undefined,
       }),
       signal: AbortSignal.timeout(600_000),
@@ -215,8 +256,8 @@ export class Agent {
     return response.json();
   }
 
-  remember(messages, sessionId, turnStart) {
-    const safeMessages = messages.slice(turnStart).map((message) => {
+  remember(messages, sessionId, previousTurns) {
+    const safeMessages = messages.map((message) => {
       if (message.role === "assistant" && typeof message.content === "string" &&
           /<unused\d+>/i.test(message.content)) {
         return {
@@ -231,7 +272,7 @@ export class Agent {
         content: "[La imagen se analizó y no se conserva en el historial.]",
       };
     });
-    const history = [...(this.histories.get(sessionId) ?? []), safeMessages]
+    const history = [...previousTurns, safeMessages]
       .slice(-this.maxHistoryTurns);
     this.histories.delete(sessionId);
     this.histories.set(sessionId, history);
@@ -244,6 +285,47 @@ export class Agent {
 function readSoul(paths) {
   try { return readFileSync(paths.soulFile, "utf8").trim(); }
   catch { return "Eres un asistente personal local, útil y claro."; }
+}
+
+function estimatePromptTokens(messages, tools) {
+  let serialized = JSON.stringify({ messages, tools });
+  const imagePayloads = serialized.match(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g) ?? [];
+  serialized = serialized.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[image payload]");
+  return Math.ceil(serialized.length / 3) +
+    (messages.length + tools.length) * 8 +
+    imagePayloads.length * 1024;
+}
+
+function compactCurrentTurn(messages) {
+  for (const message of messages) {
+    if (message.role === "tool" && typeof message.content === "string" && message.content.length > 1600) {
+      message.content = compactText(message.content, 1600);
+    }
+    if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue;
+    for (const toolCall of message.tool_calls) {
+      const fn = toolCall.function;
+      if (typeof fn?.arguments !== "string" || fn.arguments.length <= 1600) continue;
+      try {
+        const args = JSON.parse(fn.arguments);
+        for (const [key, value] of Object.entries(args)) {
+          if (typeof value === "string" && value.length > 1200) {
+            args[key] = compactText(value, 1200);
+          }
+        }
+        fn.arguments = JSON.stringify(args);
+      } catch {
+        fn.arguments = "{}";
+      }
+    }
+  }
+}
+
+function compactText(value, maxCharacters) {
+  const text = String(value);
+  if (text.length <= maxCharacters) return text;
+  const firstPart = Math.floor(maxCharacters * 0.7);
+  const lastPart = maxCharacters - firstPart;
+  return `${text.slice(0, firstPart)}\n[contenido anterior compactado]\n${text.slice(-lastPart)}`;
 }
 
 function extractText(content) {

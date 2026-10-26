@@ -11,10 +11,14 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import mammoth from "mammoth";
+import { normalizeInternationalPhoneNumber } from "./phone-number.js";
 import {
   changeIgnoredNumber,
   getConfiguredAdminNumbers,
   readCustomerInstructions,
+  readContacts,
+  resolveContactNumber,
+  updateContacts,
   readIgnoredNumbers,
   updateCustomerInstructions,
 } from "./client-access.js";
@@ -77,9 +81,21 @@ export const fileToolDefinitions = [
     number: { type: "string", description: "Número internacional E.164. No se requiere para listar." },
   }, ["action"]),
   tool("read_client_instructions", "Lee Instrucciones.txt, la única fuente de información para responder a clientes. Solo administrador.", {}),
-  tool("write_client_instructions", "Reemplaza el contenido completo de Instrucciones.txt, la fuente de información del subagente de clientes. Solo administrador; lee primero el archivo si el cambio solicitado es parcial.", {
-    content: { type: "string", description: "Contenido completo actualizado y seguro para compartir con clientes; conserva la información existente que no se pidió cambiar." },
+  tool("write_client_instructions", "Reemplaza el contenido completo de Instrucciones.txt, la fuente de información del subagente de clientes. Solo administrador; lee primero el archivo si el cambio solicitado es parcial. Mantén aquí solo instrucciones en lenguaje natural y no incluyas números de contacto privados.", {
+    content: { type: "string", description: "Contenido completo actualizado y seguro para compartir con clientes; conserva la información existente que no se pidió cambiar. No incluyas datos de contactos privados." },
   }, ["content"]),
+  tool("read_contacts", "Lee la lista privada de contactos de config/contacts.txt. Disponible solo para el administrador autenticado.", {}),
+  tool("write_contacts", "Reemplaza la lista privada de contactos de config/contacts.txt. Lee primero para conservar los contactos que no se quieren cambiar. Solo administrador.", {
+    contacts: { type: "string", description: "Lista completa con contactos separados por coma, formato Etiqueta: +número E.164. Ejemplo: Técnico: +14155552671, Vendedor: +14155552672. No escribas instrucciones ni notas aquí." },
+  }, ["contacts"]),
+  tool("send_contact_message", "Envía un mensaje de WhatsApp a un contacto guardado en contacts.txt. Solo administrador, y requiere una conversación administrativa por WhatsApp.", {
+    label: { type: "string", description: "Etiqueta exacta del contacto guardado, por ejemplo Técnico o Vendedor." },
+    message: { type: "string", description: "Mensaje que el administrador pidió enviar." },
+  }, ["label", "message"]),
+  tool("send_whatsapp_message", "Inicia o continúa una conversación de WhatsApp y envía un mensaje al número indicado por el administrador. Solo administrador; úsala únicamente cuando el administrador solicite explícitamente el envío.", {
+    phoneNumber: { type: "string", description: "Número del destinatario en formato internacional E.164, por ejemplo +14155552671." },
+    message: { type: "string", description: "Texto exacto o redactado según la solicitud del administrador; máximo 4000 bytes." },
+  }, ["phoneNumber", "message"]),
   tool("read_soul", "Lee soul.md, las directrices del agente principal. Solo administrador.", {}),
   tool("write_soul", "Actualiza soul.md, las directrices del agente principal. Solo administrador.", {
     content: { type: "string", description: "Contenido completo de soul.md." },
@@ -213,6 +229,38 @@ export function createFileToolHandlers({
     write_client_instructions: async ({ content }, context) => {
       requireAdmin(context);
       return updateCustomerInstructions(paths, content);
+    },
+    read_contacts: async (_args, context) => {
+      requireAdmin(context);
+      return readContacts(paths);
+    },
+    write_contacts: async ({ contacts }, context) => {
+      requireAdmin(context);
+      return updateContacts(paths, contacts);
+    },
+    send_contact_message: async ({ label, message }, context) => {
+      requireAdmin(context);
+      if (typeof context?.sendContactMessage !== "function") {
+        throw new Error("El envío a contactos solo está disponible desde una conversación de WhatsApp.");
+      }
+      if (typeof message !== "string" || !message.trim() || Buffer.byteLength(message, "utf8") > 4000) {
+        throw new Error("El mensaje debe tener contenido y no superar 4000 bytes.");
+      }
+      const contact = await resolveContactNumber(paths, label);
+      await context.sendContactMessage({ phoneNumber: contact.phoneNumber, text: message.trim() });
+      return `Mensaje enviado al contacto ${contact.label} por WhatsApp.`;
+    },
+    send_whatsapp_message: async ({ phoneNumber, message }, context) => {
+      requireAdmin(context);
+      if (typeof context?.sendContactMessage !== "function") {
+        throw new Error("El envío directo solo está disponible desde una conversación administrativa por WhatsApp.");
+      }
+      if (typeof message !== "string" || !message.trim() || Buffer.byteLength(message, "utf8") > 4000) {
+        throw new Error("El mensaje debe tener contenido y no superar 4000 bytes.");
+      }
+      const recipient = normalizeInternationalPhoneNumber(phoneNumber);
+      await context.sendContactMessage({ phoneNumber: recipient, text: message.trim() });
+      return "Mensaje enviado por WhatsApp al número solicitado.";
     },
     read_soul: async (_args, context) => {
       requireAdmin(context);

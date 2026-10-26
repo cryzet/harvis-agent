@@ -298,15 +298,16 @@ async function linkWhatsApp() {
   const manager = new ChannelManager(
     config,
     paths,
-    async ({ text, sender, role, phoneNumber, sendFile, channelType }) => {
+    async ({ text, sender, role, phoneNumber, sendFile, sendContactMessage, channelType }) => {
       if (role === "client" && channelType === "whatsapp") {
-        return customerAgent.reply(text, phoneNumber ?? sender);
+        return customerAgent.reply(text, phoneNumber ?? sender, { sendContactMessage });
       }
       if (role !== "admin") throw new Error("El remitente no tiene un rol autorizado para este canal.");
       return agent
         ? agent.reply(text, `whatsapp:${sender}`, {
           role: "admin",
           ...(sendFile ? { sendFile } : {}),
+          ...(sendContactMessage ? { sendContactMessage } : {}),
         })
         : "Harvis está terminando la configuración inicial.";
     },

@@ -85,9 +85,9 @@ export async function runServiceWorker() {
   channelManager = new ChannelManager(
     config,
     paths,
-    async ({ text, sender, role, phoneNumber, sendFile, channelType, attachment }) => {
+    async ({ text, sender, role, phoneNumber, sendFile, sendContactMessage, channelType, attachment }) => {
       if (role === "client" && channelType === "whatsapp") {
-        return customerAgent.reply(text, phoneNumber ?? sender);
+        return customerAgent.reply(text, phoneNumber ?? sender, { sendContactMessage });
       }
       if (role !== "admin") {
         throw new Error("El remitente no tiene un rol autorizado para este canal.");
@@ -96,6 +96,7 @@ export async function runServiceWorker() {
         role: "admin",
         ...(attachment ? { attachment } : {}),
         ...(sendFile ? { sendFile } : {}),
+        ...(sendContactMessage ? { sendContactMessage } : {}),
       });
     },
     save,
