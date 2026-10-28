@@ -396,7 +396,7 @@ guardada manualmente en la carpeta de trabajo.
 
 ## Autores
 
-- Bryan (autor del proyecto)
+- Cryzet (autor del proyecto)
 - Copilot (asistente de desarrollo)
 
 ## Pruebas
