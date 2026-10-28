@@ -33,6 +33,35 @@ export async function getPendingApprovals(paths) {
   return status.running ? status.pendingApprovals ?? [] : [];
 }
 
+export async function clearServiceMemory(paths) {
+  if (!(await getServiceStatus(paths)).running) return null;
+  const state = readServiceState(paths);
+  if (!state) return null;
+  let response;
+  try {
+    response = await fetch(`http://127.0.0.1:${state.port}/memory/clear`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${state.token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch (error) {
+    throw new Error(`No se pudo contactar al servicio para borrar su memoria: ${error.message}`);
+  }
+  const body = await response.text();
+  if (response.status === 404) {
+    // Older already-running workers do not expose the memory endpoint. A
+    // controlled restart clears their in-memory histories and loads this code.
+    await stopService(paths);
+    await startService(paths, { registerAutostart: false });
+    return "Servicio reiniciado; su memoria de conversación quedó vacía.";
+  }
+  if (!response.ok) {
+    throw new Error(body || `El servicio respondió HTTP ${response.status} al borrar la memoria.`);
+  }
+  try { return JSON.parse(body).result ?? "Memoria del servicio borrada."; }
+  catch { return body || "Memoria del servicio borrada."; }
+}
+
 export async function decideWhatsAppPairing(paths, code, decision) {
   if (!/^\d{6}$/.test(code) || !["approve", "reject"].includes(decision)) {
     throw new Error("Indica un código de seis dígitos y una decisión válida.");

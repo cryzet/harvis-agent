@@ -62,7 +62,19 @@ export class ChannelManager {
       entry.allowFrom ??= [];
       return createWhatsAppChannel({
         ...entry,
+        provider: this.config.provider,
         paths: this.paths,
+        getVoiceRepliesEnabled: () => this.config.voice?.whatsappRepliesEnabled === true,
+        setVoiceRepliesEnabled: async (enabled) => {
+          this.config.voice ??= { whatsappRepliesEnabled: false };
+          this.config.voice.whatsappRepliesEnabled = enabled;
+          await this.save?.();
+        },
+        saveAdminJids: (adminJids) => {
+          entry.adminJids = adminJids;
+          if (entry.adminIdentity) entry.adminIdentity.jids = adminJids;
+          return this.save?.();
+        },
       });
     }
     if (!entry.module) {

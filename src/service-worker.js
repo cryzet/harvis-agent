@@ -19,6 +19,7 @@ import { ChannelManager } from "./channels.js";
 import { getPaths, loadConfig, saveConfig } from "./config.js";
 import { createServiceControl } from "./service-control.js";
 import { createToolHandlers, toolDefinitions } from "./runtime-tools.js";
+import { pdfToolDefinition } from "./file-tools.js";
 import { scrapeWebPage, searchWeb, webToolDefinitions } from "./web-tools.js";
 
 const homeArgument = process.argv.indexOf("--home");
@@ -28,6 +29,8 @@ if (homeArgument !== -1 && process.argv[homeArgument + 1]) {
 const paths = getPaths();
 let channelManager;
 let serviceControl;
+let agent;
+let customerAgent;
 let stopping;
 let lockFd;
 let logStream;
@@ -50,6 +53,8 @@ export async function runServiceWorker() {
       ready,
       channels: channelManager?.list() ?? [],
     }),
+    onClearMemory: () => [agent?.clearMemory(), customerAgent?.clearMemory()]
+      .filter(Boolean).join(" "),
   });
   serviceControl.onStop?.(() => void shutdown("control"));
   writeServiceState({
@@ -69,6 +74,11 @@ export async function runServiceWorker() {
     getChannelStatuses: () => channelManager?.list() ?? [],
     searchWeb: (query, count) => searchWeb(query, config, { count }),
     scrapeWebPage: (url) => scrapeWebPage(url),
+    onPdfEnabledChange: (enabled) => {
+      agent.tools = agent.tools.filter(({ function: { name } }) => name !== "create_pdf");
+      if (enabled) agent.tools.push(pdfToolDefinition);
+      return "service";
+    },
   });
   const tools = [
     ...toolDefinitions.filter(({ function: { name } }) =>
@@ -79,24 +89,32 @@ export async function runServiceWorker() {
     ...(config.web.scrapeEnabled
       ? [webToolDefinitions.find(({ function: { name } }) => name === "web_scrape")]
       : []),
+    ...(config.pdf?.enabled ? [pdfToolDefinition] : []),
   ];
-  const agent = new Agent({ config, paths, handlers, tools });
-  const customerAgent = createCustomerAgent({ config, paths });
+  agent = new Agent({ config, paths, handlers, tools });
+  customerAgent = createCustomerAgent({ config, paths });
   channelManager = new ChannelManager(
     config,
     paths,
-    async ({ text, sender, role, phoneNumber, sendFile, sendContactMessage, channelType, attachment }) => {
+    async ({ text, sender, role, phoneNumber, sendFile, sendContactMessage, sendWhatsAppAudio, audioRequested, voiceAudioEnabled, channelType, attachment, replyFormat }) => {
       if (role === "client" && channelType === "whatsapp") {
-        return customerAgent.reply(text, phoneNumber ?? sender, { sendContactMessage });
+        return customerAgent.reply(text, phoneNumber ?? sender, {
+          sendContactMessage, replyFormat, sendWhatsAppAudio, audioRequested, voiceAudioEnabled,
+        });
       }
       if (role !== "admin") {
         throw new Error("El remitente no tiene un rol autorizado para este canal.");
       }
       return agent.reply(text, `${channelType ?? "channel"}:${sender}`, {
         role: "admin",
+        ...(channelType ? { channelType } : {}),
+        ...(replyFormat ? { replyFormat } : {}),
+        ...(audioRequested ? { audioRequested } : {}),
+        ...(voiceAudioEnabled ? { voiceAudioEnabled } : {}),
         ...(attachment ? { attachment } : {}),
         ...(sendFile ? { sendFile } : {}),
         ...(sendContactMessage ? { sendContactMessage } : {}),
+        ...(sendWhatsAppAudio ? { sendWhatsAppAudio } : {}),
       });
     },
     save,

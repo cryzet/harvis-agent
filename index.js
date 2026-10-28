@@ -12,8 +12,10 @@ import {
   saveConfig,
 } from "./src/config.js";
 import { createToolHandlers, toolDefinitions } from "./src/runtime-tools.js";
+import { pdfToolDefinition } from "./src/file-tools.js";
 import { createSkill, listSkills, setSkillEnabled } from "./src/skills.js";
 import {
+  clearServiceMemory,
   getServiceStatus,
   startService,
   stopService,
@@ -23,7 +25,11 @@ import { installSkillPackage } from "./src/skill-installer.js";
 import { getAvailableModels as fetchAvailableModels } from "./src/provider-models.js";
 import { scrapeWebPage, searchWeb, webToolDefinitions } from "./src/web-tools.js";
 import { ChannelManager } from "./src/channels.js";
-import { normalizeInternationalPhoneNumber } from "./src/phone-number.js";
+import {
+  normalizeInternationalPhoneNumber,
+  normalizeWhatsAppPhoneId,
+  samePhoneNumber,
+} from "./src/phone-number.js";
 import { createCustomerAgent } from "./src/customer-agent.js";
 import {
   changeIgnoredNumber,
@@ -53,6 +59,12 @@ const terminal = new InteractiveConsole({
     models: () => listModels(),
     channels: () => formatChannels(),
     skills: () => formatSkills(),
+    clearMemory: async () => {
+      const localResult = agent?.clearMemory();
+      const serviceResult = await clearServiceMemory(paths);
+      return [localResult, serviceResult ? `Servicio: ${serviceResult}` : null]
+        .filter(Boolean).join(" ") || "El agente todavía no está iniciado.";
+    },
     restart: () => restart(),
     startService: () => startPersistentService(),
     stopService: () => stopService(paths),
@@ -74,6 +86,8 @@ const terminal = new InteractiveConsole({
     ignoredNumbers: () => readIgnoredNumbers(paths),
     changeIgnoredNumber: (number, action) =>
       changeIgnoredNumber(paths, number, action, getConfiguredAdminNumbers(config)),
+    pdfEnabledChanged: (enabled) => applyPdfToolAvailability(enabled),
+    setVoiceRepliesEnabled: (enabled) => setVoiceRepliesEnabled(enabled),
   },
 });
 
@@ -121,9 +135,15 @@ async function startRuntime() {
     confirmInstall: (packageName, purpose) =>
       terminal.confirmInstall(packageName, purpose),
     installChannel: (name) => installChannel(name),
+    onVoiceRepliesChanged: async () => {
+      if (!(await getServiceStatus(paths)).running) return "console-only";
+      await restart();
+      return "service-restarted";
+    },
     getChannelStatuses: async () => (await getServiceStatus(paths)).channels ?? [],
     searchWeb: (query, count) => searchWeb(query, config, { count }),
     scrapeWebPage: (url) => scrapeWebPage(url),
+    onPdfEnabledChange: (enabled) => applyPdfToolAvailability(enabled),
   });
   const tools = [
     ...toolDefinitions.filter(({ function: { name } }) =>
@@ -134,11 +154,19 @@ async function startRuntime() {
     ...(config.web.scrapeEnabled
       ? [webToolDefinitions.find(({ function: { name } }) => name === "web_scrape")]
       : []),
+    ...(config.pdf?.enabled ? [pdfToolDefinition] : []),
   ];
   agent = new Agent({ config, paths, handlers, tools });
   if (config.setupComplete) {
     console.info(await startPersistentService());
   }
+}
+
+function applyPdfToolAvailability(enabled) {
+  if (!agent) return false;
+  agent.tools = agent.tools.filter(({ function: { name } }) => name !== "create_pdf");
+  if (enabled) agent.tools.push(pdfToolDefinition);
+  return "console";
 }
 
 async function startPersistentService() {
@@ -176,6 +204,18 @@ async function setChannel(name, enabled) {
   return `Canal "${canonical}" ${enabled ? "habilitado" : "deshabilitado"}${serviceWasRunning ? " y aplicado" : ""}.`;
 }
 
+async function setVoiceRepliesEnabled(enabled) {
+  if (typeof enabled !== "boolean") {
+    throw new Error("Indica on o off para las respuestas de voz.");
+  }
+  config.voice ??= { whatsappRepliesEnabled: false };
+  config.voice.whatsappRepliesEnabled = enabled;
+  saveConfig(config, paths);
+  const serviceWasRunning = (await getServiceStatus(paths)).running;
+  if (serviceWasRunning) await restart();
+  return `Respuestas de voz por WhatsApp ${enabled ? "activadas" : "desactivadas"}${serviceWasRunning ? " y aplicadas" : ""}. Cuando están activas, el texto de las respuestas se procesa en Edge TTS para generar el audio.`;
+}
+
 function authorizeChannel(type, senderId) {
   const channel = config.channels.find((entry) => entry.type === type);
   if (!channel) throw new Error(`El canal "${type}" no está instalado.`);
@@ -183,6 +223,16 @@ function authorizeChannel(type, senderId) {
   if (!id) throw new Error("El identificador del contacto no puede estar vacío.");
   if (type === "whatsapp") {
     const number = normalizeInternationalPhoneNumber(id);
+    const sameAdmin = samePhoneNumber(channel.adminIdentity?.phoneNumber, number) ||
+      samePhoneNumber(channel.adminNumber, number);
+    channel.adminIdentity = {
+      id: normalizeWhatsAppPhoneId(number),
+      phoneNumber: number,
+      jids: sameAdmin
+        ? (channel.adminIdentity?.jids ?? channel.adminJids ?? [])
+        : [],
+    };
+    channel.adminJids = channel.adminIdentity.jids;
     channel.adminNumber = number;
     channel.allowFrom = [number];
     saveConfig(config, paths);
@@ -224,12 +274,7 @@ async function installChannel(name) {
   });
   let followUp = "";
   if (packageName === "whatsapp") {
-    const linkNow = (await terminal.ask("¿Quieres vincular WhatsApp ahora? [S/n]: "))
-      .trim().toLowerCase();
-    if (!["n", "no"].includes(linkNow)) {
-      await configureWhatsAppNumber();
-      followUp = await linkWhatsApp();
-    }
+    followUp = await setupWhatsApp();
   } else if (["telegram", "discord"].includes(packageName.toLowerCase())) {
     const channelName = packageName.toLowerCase();
     const connectNow = (await terminal.ask(`¿Quieres configurar y conectar ${channelName} ahora? [S/n]: `))
@@ -255,9 +300,10 @@ async function installChannel(name) {
 
 async function configureWhatsAppNumber(input = "") {
   const entry = config.channels.find(({ type }) => type === "whatsapp");
-  if (!entry) throw new Error("Instala primero el canal WhatsApp.");
-  const currentNumber = (entry.allowFrom ?? []).find((number) =>
-    String(number).startsWith("+")) ?? "";
+  if (!entry) throw new Error("Habilita primero WhatsApp desde /configure > Canales.");
+  const currentPhoneId = normalizeWhatsAppPhoneId(entry.adminNumber) ??
+    (entry.allowFrom ?? []).map(normalizeWhatsAppPhoneId).find(Boolean);
+  const currentNumber = currentPhoneId ? `+${currentPhoneId}` : "";
   let value = String(input).trim();
   while (!value) {
     value = (await terminal.ask(
@@ -266,6 +312,14 @@ async function configureWhatsAppNumber(input = "") {
     if (!value && currentNumber) value = currentNumber;
   }
   const number = normalizeInternationalPhoneNumber(value);
+  const sameAdmin = samePhoneNumber(entry.adminIdentity?.phoneNumber, number) ||
+    samePhoneNumber(entry.adminNumber, number);
+  entry.adminIdentity = {
+    id: normalizeWhatsAppPhoneId(number),
+    phoneNumber: number,
+    jids: sameAdmin ? (entry.adminIdentity?.jids ?? entry.adminJids ?? []) : [],
+  };
+  entry.adminJids = entry.adminIdentity.jids;
   entry.allowFrom = [number];
   entry.adminNumber = number;
   entry.enabled = true;
@@ -286,7 +340,7 @@ async function setupWhatsApp() {
 async function linkWhatsApp() {
   const channel = config.channels.find(({ type }) => type === "whatsapp");
   if (!channel?.enabled) {
-    throw new Error("Instala y habilita WhatsApp antes de solicitar un QR.");
+    throw new Error("Habilita WhatsApp desde /configure > Canales antes de solicitar un QR.");
   }
   if (!getConfiguredAdminNumbers(channel).length) {
     throw new Error("Configura primero el número autorizado: /configure channel whatsapp number <+código-país-número>.");
@@ -306,6 +360,7 @@ async function linkWhatsApp() {
       return agent
         ? agent.reply(text, `whatsapp:${sender}`, {
           role: "admin",
+          ...(channelType ? { channelType } : {}),
           ...(sendFile ? { sendFile } : {}),
           ...(sendContactMessage ? { sendContactMessage } : {}),
         })

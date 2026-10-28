@@ -5,6 +5,7 @@ export async function createServiceControl({
   token,
   getStatus,
   onStop,
+  onClearMemory,
 }) {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
@@ -20,6 +21,14 @@ export async function createServiceControl({
       sendJson(response, 202, { stopping: true });
       onStop();
       return;
+    }
+    if (request.method === "POST" && url.pathname === "/memory/clear") {
+      if (typeof onClearMemory !== "function") return send(response, 503, "Borrado de memoria no disponible.");
+      try {
+        return sendJson(response, 200, { result: await onClearMemory() });
+      } catch (error) {
+        return send(response, 500, error.message || "No se pudo borrar la memoria.");
+      }
     }
     return send(response, 404, "No encontrado.");
   });

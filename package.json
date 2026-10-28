@@ -8,13 +8,20 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node index.js",
+    "start": "node installer.js",
+    "install:agent": "node installer.js --install-only",
     "mcp": "node src/mcp-server.js",
     "test": "node --test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "baileys": "^7.0.0-rc14",
     "mammoth": "^1.13.0",
-    "pdf-parse": "^2.4.5"
+    "node-edge-tts": "^1.2.12",
+    "ogg-opus-decoder": "^1.7.5",
+    "pdf-parse": "^2.4.5",
+    "pdfkit": "^0.20.2",
+    "qrcode-terminal": "^0.12.0",
+    "whisper-cpp-node": "^0.2.12"
   }
 }

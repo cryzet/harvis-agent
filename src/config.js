@@ -14,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { ensureClientProfileFilesSync } from "./client-access.js";
+import { normalizeWhatsAppPhoneId } from "./phone-number.js";
 
 const defaults = {
   name: "Harvis",
@@ -24,12 +25,14 @@ const defaults = {
     model: "",
     apiKey: "",
     temperature: 0.2,
-    maxTokens: 4096,
-    contextWindowTokens: 8192,
+    maxTokens: 30000,
+    contextWindowTokens: 32768,
   },
   channels: [{ type: "console", enabled: true }],
   skills: {},
   mcp: { enabled: true, transport: "stdio" },
+  pdf: { enabled: false },
+  voice: { whatsappRepliesEnabled: false },
   web: {
     searchEnabled: true,
     searchProvider: "duckduckgo",
@@ -47,6 +50,8 @@ export function createDefaultConfig(name = defaults.name) {
     channels: defaults.channels.map((channel) => ({ ...channel })),
     skills: {},
     mcp: { ...defaults.mcp },
+    pdf: { ...defaults.pdf },
+    voice: { ...defaults.voice },
     web: { ...defaults.web },
   };
 }
@@ -126,7 +131,7 @@ export function loadConfig(paths = getPaths(), {
   mkdirSync(paths.whatsappAuthDir, { recursive: true, mode: 0o700 });
   ensureClientProfileFilesSync(paths);
   if (!existsSync(paths.soulFile)) {
-    writeFileSync(paths.soulFile, "Eres un asistente personal local, útil, claro y prudente. Responde en el idioma del usuario.\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+    writeFileSync(paths.soulFile, "Eres un agente de IA con acceso a varias herramientas, debes ser útil y cordial. Usa las herramientas si resuelven una petición del usuario.\nSé cordial y no inventes cosas, busca siempre información en la web antes de dar una respuesta que no sabes.\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
   }
   if (!existsSync(paths.configFile)) saveConfig(createDefaultConfig(initialName), paths);
 
@@ -145,10 +150,33 @@ export function loadConfig(paths = getPaths(), {
     channels: Array.isArray(stored.channels) ? stored.channels : defaults.channels,
     skills: stored.skills && typeof stored.skills === "object" ? stored.skills : {},
     mcp: { ...defaults.mcp, ...stored.mcp },
+    pdf: { ...defaults.pdf, ...stored.pdf },
+    voice: { ...defaults.voice, ...stored.voice },
     web: { ...defaults.web, ...stored.web },
   };
-  if (config.provider.maxTokens === 1024 || config.provider.maxTokens === 1000) {
+  for (const channel of config.channels) {
+    if (channel.type !== "whatsapp") continue;
+    const configuredNumber = channel.adminNumber ?? channel.allowFrom?.find(normalizeWhatsAppPhoneId);
+    const phoneId = normalizeWhatsAppPhoneId(configuredNumber);
+    if (!phoneId) continue;
+    const phoneNumber = `+${phoneId}`;
+    const identity = channel.adminIdentity;
+    const canonicalId = phoneId;
+    if (identity?.phoneNumber === phoneNumber && identity.id === canonicalId) continue;
+    channel.adminIdentity = {
+      id: canonicalId,
+      phoneNumber,
+      jids: Array.isArray(channel.adminJids) ? channel.adminJids : [],
+    };
+    channel.adminJids = channel.adminIdentity.jids;
+    saveConfig(config, paths);
+  }
+  if ([1000, 1024, 4096].includes(config.provider.maxTokens)) {
     config.provider.maxTokens = defaults.provider.maxTokens;
+    saveConfig(config, paths);
+  }
+  if (config.provider.contextWindowTokens === 8192) {
+    config.provider.contextWindowTokens = defaults.provider.contextWindowTokens;
     saveConfig(config, paths);
   }
   config.provider.baseUrl = process.env.OPENAI_BASE_URL || config.provider.baseUrl;

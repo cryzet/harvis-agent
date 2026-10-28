@@ -9,7 +9,7 @@ import { ChannelManager } from "../src/channels.js";
 import { createChannel as createTelegramChannel } from "../src/channels/telegram.js";
 import { createChannel as createDiscordChannel } from "../src/channels/discord.js";
 
-test("installs the Baileys WhatsApp adapter on demand", async () => {
+test("enables the WhatsApp adapter whose dependencies come from the Harvis installer", async () => {
   const config = { channels: [{ type: "console", enabled: true }] };
   const installs = [];
   let saved = false;
@@ -20,13 +20,10 @@ test("installs the Baileys WhatsApp adapter on demand", async () => {
     save: () => { saved = true; },
   });
 
-  assert.deepEqual(installs, [{
-    packages: ["baileys@7.0.0-rc14", "qrcode-terminal@0.12.0"],
-    prefix: "C:\\profile",
-  }]);
+  assert.deepEqual(installs, []);
   assert.deepEqual(config.channels[1], { type: "whatsapp", enabled: true });
   assert.equal(saved, true);
-  assert.match(result, /Baileys.*WhatsApp/);
+  assert.match(result, /dependencias.*instaladas por el instalador/i);
 });
 
 test("installs Telegram and Discord adapters without enabling incomplete credentials", async () => {

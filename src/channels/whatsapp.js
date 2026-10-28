@@ -8,20 +8,29 @@ import {
   sanitizeFileName,
 } from "../file-tools.js";
 import { getConfiguredAdminNumbers, readIgnoredNumbers } from "../client-access.js";
+import { transcribeVoiceMessage } from "../speech-recognition.js";
+import { synthesizeSpanishSpeech } from "../text-to-speech.js";
 import {
-  getInternationalPhoneNumber,
   normalizeInternationalPhoneNumber,
+  normalizeWhatsAppPhoneId,
+  samePhoneNumber,
 } from "../phone-number.js";
 
 export async function createChannel(config) {
+  const voiceRepliesEnabled = () => config.getVoiceRepliesEnabled?.() === true;
   const requireFromProfile = createRequire(join(config.paths.root, "package.json"));
+  const requireFromApplication = createRequire(new URL("../../package.json", import.meta.url));
+  const resolveDependency = (name) => {
+    try { return requireFromProfile.resolve(name); }
+    catch { return requireFromApplication.resolve(name); }
+  };
   let baileys;
   try {
-    const modulePath = requireFromProfile.resolve("baileys");
+    const modulePath = resolveDependency("baileys");
     baileys = await import(pathToFileURL(modulePath).href);
   } catch (error) {
     throw new Error(
-      'Falta baileys. Ejecuta "/configure channel install whatsapp" para instalar el canal.',
+      "Falta Baileys. Ejecuta npm start o npm run install:agent para preparar las dependencias de Harvis.",
       { cause: error },
     );
   }
@@ -30,7 +39,14 @@ export async function createChannel(config) {
   if (typeof makeWASocket !== "function" || typeof useMultiFileAuthState !== "function") {
     throw new Error("La versión instalada de Baileys no expone la interfaz esperada.");
   }
-  const pino = requireFromProfile("pino");
+  let pino;
+  try {
+    const pinoPath = resolveDependency("pino");
+    const pinoModule = await import(pathToFileURL(pinoPath).href);
+    pino = pinoModule.default ?? pinoModule;
+  } catch (error) {
+    throw new Error("La instalación de Baileys no incluye un logger Pino compatible.", { cause: error });
+  }
   if (typeof pino !== "function") {
     throw new Error("La instalación de Baileys no incluye un logger Pino compatible.");
   }
@@ -39,6 +55,7 @@ export async function createChannel(config) {
   let socket;
   let saveCreds;
   let stopped = false;
+  let incomingMessageQueue = Promise.resolve();
   let reconnectTimer;
   let reconnectAttempt = 0;
   let resolveStartup;
@@ -46,7 +63,11 @@ export async function createChannel(config) {
   let startupReady = Promise.resolve();
   let connected = false;
   const connectionWaiters = new Set();
-  const adminNumbers = getConfiguredAdminNumbers(config);
+  // OpenClaw canonicalizes WhatsApp allowlist and inbound sender IDs to
+  // digit-only phone IDs. Keep that same representation for every comparison.
+  const configuredAdminNumbers = getConfiguredAdminNumbers(config);
+  const adminNumbers = configuredAdminNumbers.map(normalizeWhatsAppPhoneId).filter(Boolean);
+  const adminIdentity = config.adminIdentity;
   return {
     async start({ onMessage }) {
       const auth = await useMultiFileAuthState(config.paths.whatsappAuthDir);
@@ -65,9 +86,20 @@ export async function createChannel(config) {
         });
         socket = current;
         current.ev.on("creds.update", saveCreds);
+        // Baileys 7 may learn a PN ↔ LID pair outside a messages.upsert event.
+        // Keep the administrator's pair when that happens so future LID-only
+        // messages remain authenticated after proactive messages or reconnects.
+        current.ev.on("lid-mapping.update", async (update) => {
+          const lid = update?.lid ?? update?.mapping?.lid;
+          const pn = update?.pn ?? update?.phoneNumber ?? update?.mapping?.pn;
+          const phoneId = normalizeWhatsAppPhoneId(pn);
+          if (lid && phoneId && adminNumbers.includes(phoneId)) {
+            await rememberAdminJids(current, [lid, pn]);
+          }
+        });
         current.ev.on("connection.update", async ({ qr, connection, lastDisconnect }) => {
           if (qr) {
-            await printQr(qr, requireFromProfile);
+            await printQr(qr, resolveDependency);
             markStartupReady();
           }
           if (connection === "open") {
@@ -95,8 +127,11 @@ export async function createChannel(config) {
             reconnectTimer = setTimeout(connect, delay);
           }
         });
-        current.ev.on("messages.upsert", async ({ messages, type }) => {
-          if (type !== "notify" || current !== socket) return;
+        current.ev.on("messages.upsert", (upsert) => {
+          incomingMessageQueue = incomingMessageQueue.catch(() => {})
+            .then(async () => {
+              const { messages, type } = upsert;
+              if (type !== "notify" || current !== socket) return;
           for (const message of messages) {
             const jid = message.key?.remoteJid;
             if (!jid || message.key.fromMe || jid.endsWith("@g.us") || jid === "status@broadcast") continue;
@@ -106,13 +141,34 @@ export async function createChannel(config) {
               content?.imageMessage?.caption ??
               content?.videoMessage?.caption ??
               content?.documentMessage?.caption;
-            const senderNumbers = [jid, message.key.remoteJidAlt]
-              .map(getInternationalPhoneNumber)
-              .filter(Boolean);
-            const senderNumber = senderNumbers.find((number) => adminNumbers.includes(number)) ??
-              senderNumbers[0];
+            const messageJids = getMessageIdentifiers(message);
+            const senderNumbers = await resolveMessagePhoneNumbers(messageJids, current);
+            const hasAdminIdentity = typeof adminIdentity?.id === "string" &&
+              adminIdentity.id === adminNumbers[0] &&
+              normalizeWhatsAppPhoneId(adminIdentity.phoneNumber) === adminNumbers[0];
+            // Merge both fields during migration: older builds stored aliases
+            // only in adminJids, while newer builds persist them on identity.
+            const identityJids = hasAdminIdentity
+              ? [
+                ...(Array.isArray(adminIdentity.jids) ? adminIdentity.jids : []),
+                ...(Array.isArray(config.adminJids) ? config.adminJids : []),
+              ]
+              : [];
+            const adminJids = new Set((Array.isArray(identityJids) ? identityJids : [])
+              .map(normalizeWhatsAppJid).filter(Boolean));
+            const knownAdminJid = hasAdminIdentity && messageJids.some((identifier) =>
+              adminJids.has(normalizeWhatsAppJid(identifier)));
+            const matchedAdminNumber = senderNumbers.find((number) =>
+              hasAdminIdentity
+                ? normalizeWhatsAppPhoneId(number) === adminNumbers[0]
+                : adminNumbers.includes(normalizeWhatsAppPhoneId(number)));
+            const senderNumber = matchedAdminNumber ??
+              (knownAdminJid ? (adminIdentity?.phoneNumber ?? configuredAdminNumbers[0]) : senderNumbers[0]);
             if (!senderNumber) continue;
-            const isAdmin = adminNumbers.includes(senderNumber);
+            const isAdmin = hasAdminIdentity
+              ? knownAdminJid || normalizeWhatsAppPhoneId(matchedAdminNumber) === adminNumbers[0]
+              : adminNumbers.includes(normalizeWhatsAppPhoneId(senderNumber));
+            if (isAdmin) await rememberAdminJids(current, messageJids);
             if (!isAdmin) {
               let ignoredNumbers;
               try {
@@ -121,18 +177,32 @@ export async function createChannel(config) {
                 console.error(`No se pudo validar Ignore.txt; se ignoró el mensaje de ${senderNumber}: ${error.message}`);
                 continue;
               }
-              if (ignoredNumbers.includes(senderNumber)) continue;
+              if (ignoredNumbers.some((number) => samePhoneNumber(number, senderNumber))) continue;
             }
             try {
               const media = getIncomingMedia(message);
               if (!receivedText?.trim() && !media) continue;
-              if (!isAdmin && media) {
+              if (!isAdmin && media && media.kind !== "audio") {
                 await current.sendMessage(jid, {
                   text: "Por seguridad, no recibo archivos de clientes. Contacta al administrador.",
                 });
                 continue;
               }
               let text = receivedText?.trim() ?? "";
+              if (isAdmin && /^\/voz\s+(on|off|estado)$/i.test(text)) {
+                const [, action] = text.match(/^\/voz\s+(on|off|estado)$/i);
+                if (action.toLowerCase() === "estado") {
+                  await current.sendMessage(jid, {
+                    text: `Respuestas de voz por WhatsApp: ${voiceRepliesEnabled() ? "activadas" : "desactivadas"}.`,
+                  });
+                } else {
+                  await config.setVoiceRepliesEnabled?.(action.toLowerCase() === "on");
+                  await current.sendMessage(jid, {
+                    text: `Respuestas de voz por WhatsApp ${action.toLowerCase() === "on" ? "activadas" : "desactivadas"}.`,
+                  });
+                }
+                continue;
+              }
               let attachment;
               if (media) {
                 if (media.size !== undefined && !isTransferSizeAllowed(media.size)) {
@@ -144,29 +214,51 @@ export async function createChannel(config) {
                 if (typeof baileys.downloadMediaMessage !== "function") {
                   throw new Error("La versión de Baileys instalada no permite descargar adjuntos.");
                 }
-                const buffer = await baileys.downloadMediaMessage(
-                  message,
-                  "buffer",
-                  {},
-                  { logger, reuploadRequest: current.updateMediaMessage },
-                );
+                let buffer;
+                try {
+                  buffer = await baileys.downloadMediaMessage(
+                    message,
+                    "buffer",
+                    {},
+                    { logger, reuploadRequest: current.updateMediaMessage },
+                  );
+                } catch (error) {
+                  throw new Error(`WhatsApp no pudo descargar el archivo adjunto: ${error.message}`, { cause: error });
+                }
                 const fileBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-                const workDir = config.paths.filesDir ?? await prepareWorkDirectory(config.name);
-                const savedPath = await saveIncomingFile({
-                  buffer: fileBuffer,
-                  fileName: media.fileName,
-                  workDir,
-                  channel: "whatsapp",
-                });
-                attachment = {
-                  path: savedPath,
-                  fileName: media.fileName,
-                  mimetype: media.mimetype,
-                };
-                text = [text, `Archivo recibido y guardado: ${savedPath}.`]
-                  .filter(Boolean)
-                  .join("\n");
+                if (media.kind === "audio") {
+                  await updatePresence(current, "composing", jid);
+                  let transcript;
+                  try {
+                    transcript = await transcribeVoiceMessage(fileBuffer);
+                  } catch (error) {
+                    throw new Error(`Falló la transcripción local del audio: ${error.message}`, { cause: error });
+                  }
+                  text = [text, `Transcripción del mensaje de voz: ${transcript}`]
+                    .filter(Boolean)
+                    .join("\n");
+                } else {
+                  const workDir = config.paths.filesDir ?? await prepareWorkDirectory(config.name);
+                  const savedPath = await saveIncomingFile({
+                    buffer: fileBuffer,
+                    fileName: media.fileName,
+                    workDir,
+                    channel: "whatsapp",
+                  });
+                  attachment = {
+                    path: savedPath,
+                    fileName: media.fileName,
+                    mimetype: media.mimetype,
+                  };
+                  text = [text, `Archivo recibido y guardado: ${savedPath}.`]
+                    .filter(Boolean)
+                    .join("\n");
+                }
               }
+              const requestedReplyFormat = detectWhatsAppReplyFormat(text);
+              const voiceAudioEnabled = voiceRepliesEnabled();
+              const replyFormat = requestedReplyFormat ?? "text";
+              let requestedAudioText;
               await updatePresence(current, "composing", jid);
               let answer;
               try {
@@ -177,6 +269,16 @@ export async function createChannel(config) {
                   attachment,
                   role: isAdmin ? "admin" : "client",
                   channelType: "whatsapp",
+                  replyFormat,
+                  voiceAudioEnabled,
+                  audioRequested: requestedReplyFormat === "audio",
+                  sendWhatsAppAudio: (audioText) => {
+                    if (requestedAudioText) {
+                      throw new Error("Ya se solicitó el envío de audio para esta respuesta.");
+                    }
+                    requestedAudioText = String(audioText ?? "").trim();
+                    return "Respuesta de audio preparada para enviarse al finalizar el turno.";
+                  },
                   phoneNumber: senderNumber,
                   ...(isAdmin ? { sendFile: (file) => sendFile(current, jid, file) } : {}),
                   sendContactMessage: (message) => sendContactMessage(current, message),
@@ -184,18 +286,39 @@ export async function createChannel(config) {
               } finally {
                 await updatePresence(current, "paused", jid);
               }
-              if (answer) await current.sendMessage(jid, { text: String(answer) });
+              if (answer) {
+                const responseText = String(answer);
+                if (requestedAudioText) {
+                  try {
+                    const audio = await synthesizeSpanishSpeech(requestedAudioText);
+                    if (!isTransferSizeAllowed(audio.length)) {
+                      throw new Error("El audio generado supera el límite de envío de 16 MB.");
+                    }
+                    await current.sendMessage(jid, { audio, mimetype: "audio/mpeg" });
+                  } catch (error) {
+                    console.warn(`No se pudo generar o enviar la respuesta de voz por WhatsApp: ${error.message}`);
+                    await current.sendMessage(jid, { text: requestedAudioText });
+                  }
+                } else {
+                  await current.sendMessage(jid, { text: responseText });
+                }
+              }
             } catch (error) {
               console.error(`No se pudo responder al mensaje de WhatsApp: ${error.message}`);
               try {
+                await updatePresence(current, "paused", jid);
                 await current.sendMessage(jid, {
-                  text: `No pude procesar el mensaje o archivo: ${error.message}`,
+                  text: `No pude procesar el mensaje o archivo: ${error.name === "TimeoutError" || error.name === "AbortError" ? "se agotó el tiempo esperando el modelo Whisper. Revisa la conexión a huggingface.co e inténtalo de nuevo." : error.message}`,
                 });
               } catch (sendError) {
                 console.error(`No se pudo notificar el error por WhatsApp: ${sendError.message}`);
               }
             }
           }
+            })
+            .catch((error) => {
+              console.error(`No se pudo procesar una tanda de mensajes de WhatsApp: ${error.message}`);
+            });
         });
       };
       connect();
@@ -276,8 +399,113 @@ export async function createChannel(config) {
       throw new Error("El aviso al técnico no contiene texto.");
     }
     const jid = `${normalized.slice(1)}@s.whatsapp.net`;
-    await current.sendMessage(jid, { text: text.slice(0, 4000) });
+    const result = await current.sendMessage(jid, { text: text.slice(0, 4000) });
+    if (adminNumbers.includes(normalizeWhatsAppPhoneId(normalized))) {
+      await rememberAdminJids(current, [jid, ...getMessageIdentifiers(result)]);
+    }
+    return result;
   }
+
+  async function rememberAdminJids(current, identifiers) {
+    const existingAliases = [
+      ...(Array.isArray(config.adminJids) ? config.adminJids : []),
+      ...(Array.isArray(adminIdentity?.jids) ? adminIdentity.jids : []),
+    ].map(normalizeWhatsAppJid).filter(Boolean);
+    const aliases = new Set(existingAliases);
+    const lidMapping = current.signalRepository?.lidMapping;
+    for (const identifier of identifiers) {
+      const normalized = normalizeWhatsAppJid(identifier);
+      if (!normalized || !normalized.includes("@")) continue;
+      aliases.add(normalized);
+      if (normalized.endsWith("@lid") && typeof lidMapping?.getPNForLID === "function") {
+        try {
+          const pn = normalizeWhatsAppJid(await lidMapping.getPNForLID(normalized));
+          if (pn) aliases.add(pn);
+        } catch {
+          // Keep the LID itself; it will still identify the configured administrator.
+        }
+      }
+      if (normalized.endsWith("@s.whatsapp.net") && typeof lidMapping?.getLIDForPN === "function") {
+        try {
+          const lid = normalizeWhatsAppJid(await lidMapping.getLIDForPN(normalized));
+          if (lid) aliases.add(lid);
+        } catch {
+          // The PN remains a valid identifier when no LID mapping is cached.
+        }
+      }
+    }
+    const nextAliases = [...aliases].slice(-20);
+    if (nextAliases.length === existingAliases.length &&
+        nextAliases.every((alias) => existingAliases.includes(alias)) &&
+        config.adminJids?.length === nextAliases.length) return;
+    config.adminJids = nextAliases;
+    if (adminIdentity?.id === adminNumbers[0] &&
+        normalizeWhatsAppPhoneId(adminIdentity.phoneNumber) === adminNumbers[0]) {
+      adminIdentity.jids = nextAliases;
+    }
+    try {
+      await config.saveAdminJids?.(nextAliases);
+    } catch (error) {
+      console.warn(`No se pudo guardar el identificador WhatsApp del administrador: ${error.message}`);
+    }
+  }
+}
+
+function detectWhatsAppReplyFormat(text) {
+  const normalized = String(text ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  if (/\b(solo texto|solo por escrito|en texto|por escrito|sin audio|no (?:me )?(?:mandes|envies|respondas con) (?:un )?(?:audio|nota de voz))\b/.test(normalized)) {
+    return "text";
+  }
+  if (/\b(?:responde|respondeme|contesta|contestame|envia|enviame|manda|mandame)\b.{0,35}\b(?:audio|voz|nota de voz)\b|\b(?:en|por) (?:un )?(?:audio|voz|nota de voz)\b/.test(normalized)) {
+    return "audio";
+  }
+  return undefined;
+}
+
+function getMessageIdentifiers(message) {
+  const key = message?.key ?? message ?? {};
+  return [
+    key.remoteJidAlt,
+    key.senderPn,
+    key.participantAlt,
+    key.participantPn,
+    key.remoteJid,
+    key.participant,
+  ].filter((value) => typeof value === "string");
+}
+
+function normalizeWhatsAppJid(value) {
+  if (typeof value !== "string") return null;
+  const jid = value.trim().replace(/:\d+(?=@)/, "").toLowerCase();
+  return /^(?:[1-9]\d{7,14}|\d+)@(s\.whatsapp\.net|lid)$/.test(jid) ? jid : null;
+}
+
+async function resolveMessagePhoneNumbers(identifiers, socket) {
+  const numbers = new Set();
+  for (const identifier of identifiers) {
+    const phoneId = normalizeWhatsAppPhoneId(identifier);
+    if (phoneId) numbers.add(`+${phoneId}`);
+  }
+
+  const lidMapping = socket.signalRepository?.lidMapping;
+  if (typeof lidMapping?.getPNForLID === "function") {
+    for (const identifier of identifiers.filter((value) => value.endsWith("@lid"))) {
+      const normalizedLid = identifier.replace(/:\d+@lid$/, "@lid");
+      for (const lid of new Set([identifier, normalizedLid])) {
+        try {
+          const phoneJid = await lidMapping.getPNForLID(lid);
+          const phoneId = normalizeWhatsAppPhoneId(phoneJid);
+          if (phoneId) numbers.add(`+${phoneId}`);
+        } catch {
+          // Baileys may not have a cached PN mapping for every LID yet.
+        }
+      }
+    }
+  }
+  return [...numbers];
 }
 
 function getIncomingMedia(message) {
@@ -297,6 +525,7 @@ function getIncomingMedia(message) {
   return {
     fileName: sanitizeFileName(media.fileName || `whatsapp-${Date.now()}${extension}`),
     mimetype: mime,
+    kind: content.audioMessage ? "audio" : "file",
     size: media.fileLength === undefined ? undefined : Number(media.fileLength),
   };
 }
@@ -315,9 +544,9 @@ function unwrapMessageContent(message) {
   return content;
 }
 
-async function printQr(qr, requireFromProfile) {
+async function printQr(qr, resolveDependency) {
   try {
-    const qrPath = requireFromProfile.resolve("qrcode-terminal");
+    const qrPath = resolveDependency("qrcode-terminal");
     const qrCode = await import(pathToFileURL(qrPath).href);
     const renderer = qrCode.default ?? qrCode;
     if (typeof renderer.generate !== "function") {

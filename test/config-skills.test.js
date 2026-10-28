@@ -46,7 +46,8 @@ test("initializes profile instructions and ignore files without overwriting exis
   const paths = getPaths({ APPDATA: root }, "win32");
   t.after(() => rm(root, { recursive: true, force: true }));
   const config = loadConfig(paths);
-  assert.equal(await readFile(paths.instructionsFile, "utf8"), "");
+  assert.match(await readFile(paths.instructionsFile, "utf8"), /subagente dedicado a atender a los clientes/i);
+  assert.match(await readFile(paths.instructionsFile, "utf8"), /Técnico, Vendedor o Atención al cliente/);
   assert.equal(await readFile(paths.ignoreFile, "utf8"), "");
 
   await writeFile(paths.instructionsFile, "Solo horario: 9 a 5.");
@@ -57,16 +58,20 @@ test("initializes profile instructions and ignore files without overwriting exis
   assert.equal(config.name, "Harvis");
 });
 
-test("sets the default response limit to 1000 tokens and migrates the old default", async (t) => {
+test("sets the default response limit to 30000 tokens and migrates older defaults", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harvis-token-limit-"));
   const paths = getPaths({ APPDATA: root }, "win32");
   t.after(() => rm(root, { recursive: true, force: true }));
-  assert.equal(loadConfig(paths).provider.maxTokens, 1000);
+  assert.equal(loadConfig(paths).provider.maxTokens, 30000);
 
   const legacyConfig = JSON.parse(await readFile(paths.configFile, "utf8"));
   legacyConfig.provider.maxTokens = 1024;
   await writeFile(paths.configFile, JSON.stringify(legacyConfig));
-  assert.equal(loadConfig(paths).provider.maxTokens, 1000);
+  assert.equal(loadConfig(paths).provider.maxTokens, 30000);
+
+  legacyConfig.provider.maxTokens = 4096;
+  await writeFile(paths.configFile, JSON.stringify(legacyConfig));
+  assert.equal(loadConfig(paths).provider.maxTokens, 30000);
 });
 
 test("supports environment configuration for remote model providers", async (t) => {

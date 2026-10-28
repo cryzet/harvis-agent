@@ -1,20 +1,37 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { normalizeInternationalPhoneNumber } from "./phone-number.js";
+import {
+  normalizeInternationalPhoneNumber,
+  normalizeWhatsAppPhoneId,
+  samePhoneNumber,
+} from "./phone-number.js";
+
+export const defaultCustomerInstructions = [
+  "Eres un subagente dedicado a atender a los clientes de la empresa. Tu función es informarles con cordialidad sobre los productos y servicios de la empresa.",
+  "Responde preguntas y ofrece soluciones únicamente cuando estén respaldadas por la información de productos y servicios incluida en este archivo. No inventes ni supongas datos.",
+  "Si no encuentras la respuesta o la solución que el cliente necesita, deriva su petición al trabajador pertinente usando la herramienta disponible. Elige la etiqueta adecuada entre las guardadas en contacts.txt, por ejemplo Técnico, Vendedor o Atención al cliente. El sistema enviará al trabajador el número del cliente y su petición; no solicites ni reveles números internos.",
+  "Si no hay un contacto pertinente configurado o no se pudo completar el envío, informa al cliente con cordialidad que no tienes esa información disponible y que debe consultar con el administrador. No afirmes que la consulta fue derivada si el envío no se confirmó.",
+].join("\n\n");
 
 export const defaultCustomerReply =
-  "Aún no tengo información configurada para responder. El administrador puede actualizarla en Instrucciones.txt.";
+  "Aún no tengo información configurada para responder. Por favor, consulta con el administrador.";
 
 const contactsFileIntro = [
   "# Contactos privados para avisos internos; no incluyas estos números en Instrucciones.txt.",
   "# Escribe los contactos separados por comas con formato Etiqueta: +número internacional E.164.",
   "# Ejemplo: Técnico: +14155552671, Vendedor: +14155552672",
-  "# El subbot solo usa el contacto Técnico para escalar consultas sin respuesta.",
+  "# El subbot selecciona la etiqueta pertinente (por ejemplo Técnico, Vendedor o Atención al cliente) para escalar consultas sin respuesta.",
 ].join("\n");
 
 export function ensureClientProfileFilesSync(paths) {
   mkdirSync(paths.root, { recursive: true, mode: 0o700 });
-  createProfileFileIfMissing(paths.instructionsFile);
+  createProfileFileIfMissing(paths.instructionsFile, `${defaultCustomerInstructions}\n`);
+  if (!readFileSync(paths.instructionsFile, "utf8").trim()) {
+    writeFileSync(paths.instructionsFile, `${defaultCustomerInstructions}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  }
   createProfileFileIfMissing(paths.ignoreFile);
   createProfileFileIfMissing(paths.contactsFile, `${contactsFileIntro}\n`);
   migrateTechnicianContact(paths);
@@ -126,15 +143,16 @@ export async function readIgnoredNumbers(paths) {
 
 export async function changeIgnoredNumber(paths, number, action, adminNumbers = []) {
   const normalized = normalizeInternationalPhoneNumber(number);
-  const admins = adminNumbers.map(normalizeInternationalPhoneNumber);
-  if (admins.includes(normalized)) {
+  if (adminNumbers.some((admin) => samePhoneNumber(admin, normalized))) {
     throw new Error("No se puede agregar a Ignore.txt el número administrador.");
   }
   const ignored = await readIgnoredNumbers(paths);
   const updated = action === "add"
-    ? [...new Set([...ignored, normalized])]
+    ? ignored.some((entry) => samePhoneNumber(entry, normalized))
+      ? ignored
+      : [...ignored, normalized]
     : action === "remove"
-      ? ignored.filter((entry) => entry !== normalized)
+      ? ignored.filter((entry) => !samePhoneNumber(entry, normalized))
       : null;
   if (!updated) throw new Error('La acción debe ser "add" o "remove".');
   await writeFile(paths.ignoreFile, updated.length ? `${updated.join("\n")}\n` : "", {
@@ -149,16 +167,9 @@ export async function changeIgnoredNumber(paths, number, action, adminNumbers = 
 export function getConfiguredAdminNumbers(config = {}) {
   const whatsapp = (config.channels ?? []).find(({ type }) => type === "whatsapp") ??
     (config.type === "whatsapp" || Array.isArray(config.allowFrom) ? config : undefined);
-  const candidates = whatsapp?.adminNumber
-    ? [whatsapp.adminNumber]
-    : (whatsapp?.allowFrom ?? []).filter((value) => String(value).startsWith("+")).slice(0, 1);
-  return candidates.map((number) => {
-    try {
-      return normalizeInternationalPhoneNumber(number);
-    } catch {
-      return null;
-    }
-  }).filter(Boolean);
+  const candidates = whatsapp?.adminNumber ? [whatsapp.adminNumber] : (whatsapp?.allowFrom ?? []);
+  const phoneId = candidates.map(normalizeWhatsAppPhoneId).find(Boolean);
+  return phoneId ? [`+${phoneId}`] : [];
 }
 
 function createProfileFileIfMissing(path, initialContent = "") {

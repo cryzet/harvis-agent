@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 export function checkSetup(config, paths) {
   const issues = [];
+  const requireFromApplication = createRequire(new URL("../package.json", import.meta.url));
 
   try {
     const url = new URL(config.provider.baseUrl);
@@ -31,7 +32,14 @@ export function checkSetup(config, paths) {
       try {
         createRequire(resolve(paths.root, "package.json")).resolve(dependencies[channel.type]);
       } catch {
-        issues.push(`Falta la dependencia del canal ${channel.type}. Instálala desde /configure > Canales.`);
+        try {
+          if (channel.type !== "whatsapp") throw new Error("No está instalada en la aplicación.");
+          requireFromApplication.resolve(dependencies[channel.type]);
+        } catch {
+          issues.push(channel.type === "whatsapp"
+            ? "Falta Baileys. Ejecuta npm start o npm run install:agent para instalar las dependencias de Harvis."
+            : `Falta la dependencia del canal ${channel.type}. Instálala desde /configure > Canales.`);
+        }
       }
       continue;
     }

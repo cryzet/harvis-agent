@@ -21,16 +21,36 @@ MIT; este proyecto no incluye código fuente copiado de OpenClaw.
   LM Studio local).
 
 ```powershell
-npm install
 npm start
 ```
 
-En Windows también puedes ejecutar `iniciar-harvis.bat`. En la primera
+`npm start` comprueba e instala automáticamente las dependencias de la
+aplicación, incluido WhatsApp, y descarga el modelo local de transcripción antes
+de abrir el asistente de primer inicio. Para instalar sin iniciar el agente,
+ejecuta `npm run install:agent`; también descarga el modelo. En
+Windows puedes usar `instalar-harvis.bat`. En Windows también puedes ejecutar
+`iniciar-harvis.bat`, que realiza la misma comprobación al iniciar. En la primera
 ejecución interactiva, Harvis pide primero el nombre y luego abre el asistente
 QuickStart / Manual setup; en las siguientes, usa `/configure` para volver a
 abrir los menús. Ejecuta `/help` para ver todos los comandos. En una ejecución
 sin terminal interactiva, `HARVIS_AGENT_NAME` permite indicar el nombre inicial;
 si no está definida, se usa `Harvis`.
+
+Las respuestas de voz de WhatsApp están desactivadas por defecto. Actívalas o
+desactívalas desde la consola con `/voz on`, `/voz off` o `/voz estado`; el
+administrador también puede enviar esos comandos desde WhatsApp. El agente
+puede cambiar el ajuste cuando el administrador se lo pida explícitamente.
+Cuando están activas, Harvis envía el texto de las respuestas de WhatsApp a
+Edge TTS para generar un MP3 y responde solo con ese audio. El audio usa una
+reformulación oral y breve. Si falla la reformulación o la síntesis, Harvis envía
+la respuesta escrita como respaldo. Requiere conexión a Internet.
+Los mensajes de voz entrantes de WhatsApp se transcriben automáticamente con
+Whisper Tiny local y se entregan como texto al agente principal o al subbot de
+clientes. El modelo (aprox. 75 MB) se descarga durante la instalación en
+`models/` junto a `package.json`, de modo que los audios puedan transcribirse sin
+esperar a que baje el modelo. Los mensajes de WhatsApp entrantes se procesan
+secuencialmente en el orden recibido, incluidos textos y audios. Se aceptan
+audios de hasta 16 MB y 5 minutos.
 
 El perfil de trabajo final está en `Documents/<nombre del agente>_WorkDir`; el
 nombre es el que se elige durante la primera configuración. Su estructura es:
@@ -57,16 +77,15 @@ de onboarding de OpenClaw:
    **Manual setup** (muestra las notas completas de seguridad).
 2. Configura el proveedor, URL, modelo y API key (LM Studio, OpenAI o endpoint
    compatible). Puedes probar la conexión antes de continuar.
-3. Instala uno o más canales (WhatsApp, Telegram o Discord). Después de cada
-   instalación, Harvis pregunta si quieres vincular o configurar el canal en ese
-   momento. Si aceptas WhatsApp, solicita el número administrador y muestra el
-   QR. Para Telegram o Discord, solicita el token del bot.
+3. Configura uno o más canales (WhatsApp, Telegram o Discord). Las dependencias
+   de WhatsApp ya quedaron instaladas por el paso previo; el asistente puede
+   solicitar el número administrador y mostrar el QR. Para Telegram o Discord,
+   Harvis instala sus paquetes cuando los eliges y solicita el token del bot.
 4. Crea una skill Markdown local o instala una publicada en npm.
-5. Configura búsqueda en tiempo real con DuckDuckGo (sin API key) o Brave Search
-   (requiere API key), y habilita o deshabilita la extracción de páginas web.
-   Después confirma MCP local por stdio y revisa el resumen. No hay paso de
-   gateway de red. Al terminar, los canales se inician como servicio local en
-   segundo plano.
+5. Elige si habilitar la herramienta integrada para generar PDFs de texto.
+   Después configura búsqueda web y scraping, confirma MCP local por stdio y
+   revisa el resumen. No hay paso de gateway de red. Al terminar, los canales se
+   inician como servicio local en segundo plano.
 
 El nombre elegido se utiliza como identidad del asistente en la consola: en el
 encabezado de las respuestas, el indicador de actividad, los menús y los
@@ -83,21 +102,30 @@ compatible `GET /v1/models`. Para otros proveedores compatibles consulta
 de conexión o autenticación se informan. Para chat,
 si la URL de LM Studio es solo el host o termina en `/api/v1`, Harvis la
 normaliza al endpoint compatible `/v1/chat/completions`. Las respuestas del
-agente usan el límite de salida configurado, que por defecto es 4096 tokens; la
+agente usan el límite de salida configurado, que por defecto es 30000 tokens; la
 prueba de conexión solicita hasta 1000. Los perfiles con los límites
-predeterminados anteriores de 1000 o 1024 tokens se actualizan automáticamente
-a 4096. Las solicitudes de chat y la prueba de conexión esperan hasta 10 minutos
+predeterminados anteriores de 1000, 1024 o 4096 tokens se actualizan
+automáticamente a 30000. La salida real también depende del espacio libre en la
+ventana de contexto configurada para el modelo. Las solicitudes de chat y la prueba de conexión esperan hasta 10 minutos
 para permitir que un modelo cargue y responda.
-El contexto se estima con una ventana predeterminada de 8192 tokens compartida
+El contexto se estima con una ventana predeterminada de 32768 tokens compartida
 por el agente principal y el subbot. Antes de cada solicitud, Harvis descarta
 turnos antiguos si es necesario y reduce resultados largos de herramientas; el
-límite de salida se ajusta al espacio restante. `provider.contextWindowTokens`
+contexto reserva un mínimo para responder y el límite de salida se ajusta al
+espacio restante. `provider.contextWindowTokens`
 puede ajustarse en `config/config.json` al tamaño configurado en el servidor del
-modelo.
+modelo. Si el servidor del modelo tiene una ventana menor que la configurada en
+Harvis, reduce este valor para que ambos límites coincidan.
 
 `/configure` abre las secciones **Modelo / autenticación**, **Canales**,
-**Skills**, **Perfil del agente**, **Búsqueda web y scraping**, **MCP local**,
-**Instrucciones para clientes** y **Números ignorados**. El asistente de
+**Skills**, **Perfil del agente**, **Búsqueda web y scraping**, **Creación de
+archivos PDF**, **MCP local**, **Instrucciones para clientes** y **Números
+ignorados**. PDFKit genera PDFs de texto en la carpeta `files`; la herramienta
+está deshabilitada hasta que la habilites durante el onboarding o desde
+`/configure pdf on`. También puedes deshabilitarla con `/configure pdf off`.
+Los cambios hechos desde la consola requieren `/restart`; el administrador
+también puede pedirle al agente que habilite o deshabilite la herramienta, y el
+canal aplica el cambio inmediatamente. El asistente de
 proveedor ofrece LM Studio, OpenAI y un endpoint personalizado. También se
 admiten comandos directos:
 
@@ -108,6 +136,7 @@ admiten comandos directos:
 /configure web provider <duckduckgo|brave|off>
 /configure web api-key <clave>
 /configure web scrape on|off
+/configure pdf on|off
 ```
 
 Para proveedores remotos, configura su URL compatible con OpenAI, modelo y API
@@ -129,12 +158,14 @@ en herramientas web se aplican al ejecutar `/restart`.
 
 ## Canales
 
-Los canales se instalan a petición desde **Configurar > Canales**; sus
-dependencias no forman parte de la instalación básica:
+El instalador prepara las dependencias base y WhatsApp antes del primer inicio.
+La configuración del canal se mantiene en el onboarding o en **Configurar >
+Canales**. Telegram, Discord y los canales npm externos siguen instalándose a
+petición:
 
 | Canal | Paquete instalado | Configuración |
 | --- | --- | --- |
-| WhatsApp | `baileys` y `qrcode-terminal` | Tras instalar, puedes configurar el número administrador y vincular con QR |
+| WhatsApp | `baileys` y `qrcode-terminal` (incluidos en el instalador de Harvis) | Configura el número administrador y vincula con QR durante el primer inicio o desde Canales |
 | Telegram | `grammy` | Tras instalar, puedes guardar el token del bot y conectar |
 | Discord | `discord.js` | Tras instalar, puedes guardar el token del bot y conectar |
 
@@ -189,8 +220,13 @@ subbot solo recibe las etiquetas disponibles; nunca recibe los números de
 
 El administrador puede listar, leer, crear, reemplazar, eliminar y enviar
 archivos dentro de `Documents/<nombre-del-agente>_WorkDir/files`. El agente puede
-crear notas allí sin pedir confirmación. Todas las herramientas (`list_files`,
-`read_file`, `write_file`, `delete_file` y `send_file`) usan como raíz la carpeta
+crear allí apuntes, notas, recordatorios y archivos temporales por iniciativa
+propia cuando conservar esa información pueda ayudar con solicitudes futuras.
+Debe evitar duplicados, no sobrescribir notas existentes salvo que se lo pidan y
+no guardar credenciales ni datos sensibles innecesarios. Los recordatorios son
+notas persistentes para consultar después; no generan avisos automáticos.
+Todas las herramientas (`list_files`,
+`read_file`, `write_file`, `create_pdf`, `delete_file` y `send_file`) usan como raíz la carpeta
 `files`; sus rutas son relativas a ella (por ejemplo `informe.txt`, no
 `files/informe.txt`). Los adjuntos de administradores recibidos por WhatsApp,
 Telegram y Discord se guardan respectivamente en `files/inbox/whatsapp`,
@@ -198,13 +234,31 @@ Telegram y Discord se guardan respectivamente en `files/inbox/whatsapp`,
 y envío mediante su ruta relativa. `send_file` responde por el canal en que se
 solicitó. Los adjuntos enviados por clientes de WhatsApp se rechazan antes de
 descargarse. Las rutas no pueden salir de `files/`; las herramientas no eliminan
-carpetas ni crean carpetas arbitrarias al escribir.
+carpetas, y `write_file` crea las subcarpetas necesarias dentro de `files/`.
+Cuando la creación PDF está habilitada, `create_pdf` genera un documento de
+texto de varias páginas en esa misma carpeta. El agente puede enviarlo con
+`send_file` cuando el administrador lo solicite expresamente.
 
-`config/soul.md` contiene la personalidad del agente principal y este puede
-leerla o modificarla. `config/Instrucciones.txt` pertenece exclusivamente al
-subbot de atención a clientes: el agente principal no la usa como notas ni como
-directrices propias, y solo la lee o modifica cuando el administrador se lo
-pide.
+`config/soul.md` contiene la personalidad del agente principal. Puede leerlo,
+pero solo lo modifica si el administrador pide explícitamente cambiar su
+personalidad o ese archivo. El agente tampoco modifica `config.json`, canales,
+skills, credenciales, instrucciones, contactos ni otros ajustes salvo petición
+explícita del administrador. Puede guardar notas y otros archivos de trabajo
+por iniciativa propia dentro de `files`; enviar archivos requiere una petición
+expresa del administrador. `config/Instrucciones.txt` pertenece exclusivamente
+al subbot de atención a clientes: el agente principal no la usa como notas ni
+como directrices propias, y solo la lee o modifica cuando el administrador se
+lo pide explícitamente. El subbot responde con cordialidad y respeto. En perfiles
+nuevos, las instrucciones predeterminadas establecen que es un subagente para
+informar sobre los productos y servicios de la empresa. Si no puede resolver una
+petición con la información disponible, deriva la consulta y el número del
+cliente al trabajador pertinente según la etiqueta configurada en `contacts.txt`
+(por ejemplo Técnico, Vendedor o Atención al cliente). El subbot recibe solo las
+etiquetas; el sistema resuelve el número en privado. Si no hay un contacto
+pertinente o falla el envío, no afirma que la consulta fue derivada. Al iniciar,
+Harvis agrega estas instrucciones a perfiles nuevos y a los perfiles existentes
+que todavía tengan `Instrucciones.txt` vacío; conserva las instrucciones
+personalizadas que ya tengan contenido.
 
 Se admiten archivos de texto de hasta 1 MB, PDF/DOCX e imágenes de hasta 12 MB;
 las transferencias de archivos por WhatsApp, Telegram y Discord tienen un límite
@@ -253,6 +307,8 @@ También están disponibles los comandos:
 /configure channel <tipo> allow <id>
 /configure channel <tipo> on
 /configure channel <tipo> off
+/configure pdf on
+/configure pdf off
 ```
 
 Para Telegram, crea un bot con `@BotFather`. Para Discord, crea una aplicación
@@ -324,6 +380,7 @@ sistema de archivos.
 | `/models` | Consultar modelos disponibles |
 | `/channels` | Ver canales y estado |
 | `/skills` | Ver skills y estado |
+| `/memory clear` | Borrar el historial de conversación en memoria del agente y el subbot |
 | `/start` | Iniciar el servicio y habilitar inicio automático |
 | `/stop` | Detener el servicio (conserva la tarea de inicio) |
 | `/restart` | Recargar configuración y canales |
@@ -332,6 +389,10 @@ sistema de archivos.
 `/status` muestra el estado del servicio, los canales y si el proveedor y el
 modelo están configurados, pero no imprime la URL, el ID del modelo ni las
 credenciales.
+
+`/memory clear` borra el historial de conversación temporal de todas las sesiones
+del agente principal y del subbot. No elimina archivos, configuración ni memoria
+guardada manualmente en la carpeta de trabajo.
 
 ## Autores
 

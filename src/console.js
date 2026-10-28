@@ -150,6 +150,22 @@ export class InteractiveConsole {
       case "/models": return this.handlers.models();
       case "/channels": return this.handlers.channels();
       case "/skills": return this.handlers.skills();
+      case "/voz":
+      case "/voice": {
+        const state = args[0]?.toLowerCase();
+        if (["status", "estado"].includes(state) && args.length === 1) {
+          return `Respuestas de voz por WhatsApp: ${this.config.voice?.whatsappRepliesEnabled ? "activadas" : "desactivadas"}.`;
+        }
+        if (!["on", "off"].includes(state) || args.length !== 1) {
+          throw new Error("Uso: /voz on|off|estado.");
+        }
+        return this.handlers.setVoiceRepliesEnabled(state === "on");
+      }
+      case "/memory":
+        if (args[0]?.toLowerCase() !== "clear" || args.length !== 1) {
+          throw new Error("Uso: /memory clear.");
+        }
+        return this.handlers.clearMemory();
       case "/configure": return this.configure(args);
       case "/restart":
         return this.handlers.restart();
@@ -217,6 +233,7 @@ export class InteractiveConsole {
       throw new Error("Uso: /configure ignore list | add <+número> | remove <+número>.");
     }
     if (target === "web") return this.configureWeb(rest);
+    if (target === "pdf") return this.configurePdf(rest);
     if (target === "channels" || target === "channel") {
       if (target === "channels" || !rest.length) return this.configureChannels();
       return this.configureChannel(rest);
@@ -225,7 +242,7 @@ export class InteractiveConsole {
       if (target === "skills" || !rest.length) return this.configureSkills();
       return this.configureSkill(rest);
     }
-    throw new Error("Uso: /configure [provider|channels|skills|web|name|instructions|ignore] ...");
+    throw new Error("Uso: /configure [provider|channels|skills|web|pdf|name|instructions|ignore] ...");
   }
 
   async configureMenu() {
@@ -242,6 +259,7 @@ export class InteractiveConsole {
       "│  6) MCP local",
       "│  7) Instrucciones para clientes",
       "│  8) Números ignorados",
+      "│  9) Creación de archivos PDF",
       "└  0) Salir",
     ].join("\n"));
     const selection = (await this.ask("Selección: ")).trim();
@@ -254,6 +272,7 @@ export class InteractiveConsole {
       case "6": return this.configureMcp();
       case "7": return this.configureInstructions();
       case "8": return this.configureIgnore();
+      case "9": return this.configurePdf();
       case "0": return "Configuración sin cambios.";
       default: throw new Error("Opción inválida. Ejecuta /configure e intenta de nuevo.");
     }
@@ -281,7 +300,7 @@ export class InteractiveConsole {
       "",
       `┌  ${this.config.name} · Configuración inicial`,
       "│",
-      "◆ Bienvenido. Configuraremos proveedor, canales, skills y herramientas web.",
+      "◆ Bienvenido. Configuraremos proveedor, canales, skills y herramientas.",
       `│  ${this.config.name} se ejecuta localmente; MCP usa stdio local y no abre un gateway.`,
       "│",
       "◆ Seguridad: los canales conectan tu cuenta de mensajería con este agente.",
@@ -373,6 +392,7 @@ export class InteractiveConsole {
       throw new Error("Selecciona una opción de skills del 1 al 3.");
     }
 
+    await this.configurePdf([], { onboarding: true });
     await this.configureWeb([], { onboarding: true });
 
     const useMcp = (await this.ask("¿Habilitar herramientas MCP locales por stdio? [S/n]: "))
@@ -388,6 +408,7 @@ export class InteractiveConsole {
       `│  Modelo: ${this.config.provider.model ? "configurado" : "pendiente"}`,
       `│  Web search: ${this.config.web.searchEnabled ? this.config.web.searchProvider : "deshabilitado"}`,
       `│  Web scraping: ${this.config.web.scrapeEnabled ? "habilitado" : "deshabilitado"}`,
+      `│  Creación PDF: ${this.config.pdf?.enabled ? "habilitada" : "deshabilitada"}`,
       `│  MCP local: ${this.config.mcp.enabled ? "stdio habilitado" : "deshabilitado"}`,
       "│",
       `◆ ${this.config.name} iniciará sus canales en un servicio local persistente.`,
@@ -501,9 +522,51 @@ export class InteractiveConsole {
     return "Configuración web guardada.";
   }
 
+  async configurePdf(args = [], { onboarding = false } = {}) {
+    this.config.pdf ??= { enabled: false };
+    if (args.length && !onboarding) {
+      const action = args[0]?.toLowerCase();
+      if (!["on", "off"].includes(action) || args.length !== 1) {
+        throw new Error("Uso: /configure pdf on|off.");
+      }
+      this.config.pdf.enabled = action === "on";
+      this.save();
+      this.handlers.pdfEnabledChanged?.(this.config.pdf.enabled);
+      return `Herramienta de creación PDF ${this.config.pdf.enabled ? "habilitada" : "deshabilitada"}. Ejecuta /restart para aplicar el cambio.`;
+    }
+
+    if (!onboarding) {
+      console.log(`\nCreación de PDF: ${this.config.pdf.enabled ? "habilitada" : "deshabilitada"}.`);
+    }
+    const answer = (await this.ask(
+      `¿Habilitar la herramienta integrada para crear PDFs de texto en files? ${this.config.pdf.enabled ? "[S/n]" : "[s/N]"}: `,
+    )).trim().toLowerCase();
+    if (["s", "si", "sí", "y", "yes"].includes(answer)) {
+      this.config.pdf.enabled = true;
+    } else if (["n", "no"].includes(answer)) {
+      this.config.pdf.enabled = false;
+    } else if (answer) {
+      throw new Error("Responde sí o no para habilitar la herramienta PDF.");
+    }
+    if (!onboarding) {
+      this.save();
+      this.handlers.pdfEnabledChanged?.(this.config.pdf.enabled);
+      return `Herramienta de creación PDF ${this.config.pdf.enabled ? "habilitada" : "deshabilitada"}. Ejecuta /restart para aplicar el cambio.`;
+    }
+    return `Herramienta de creación PDF ${this.config.pdf.enabled ? "habilitada" : "deshabilitada"}.`;
+  }
+
   async onboardChannel(type) {
     const installed = this.config.channels.some((channel) => channel.type === type);
     if (!installed) {
+      if (type === "whatsapp") {
+        const configure = (await this.ask(
+          "WhatsApp se instala con Harvis. ¿Quieres configurar el número administrador y vincularlo ahora? [S/n]: ",
+        )).trim().toLowerCase();
+        if (["n", "no"].includes(configure)) return;
+        console.log(await this.handlers.installChannel(type));
+        return;
+      }
       const install = (await this.ask(`¿Instalar ${type} ahora? [S/n]: `))
         .trim().toLowerCase();
       if (["n", "no"].includes(install)) return;
@@ -760,7 +823,7 @@ export class InteractiveConsole {
       const packageSpec = ["whatsapp", "wa"].includes(name)
         ? "whatsapp"
         : name;
-      if (!(await this.confirmInstall(packageSpec, "canal"))) {
+      if (packageSpec !== "whatsapp" && !(await this.confirmInstall(packageSpec, "canal"))) {
         return "Instalación cancelada.";
       }
       return this.handlers.installChannel(packageSpec);
@@ -850,7 +913,7 @@ export class InteractiveConsole {
       "  /configure provider model <id>     Elegir modelo",
       "  /configure provider api-key <key>  Guardar API key",
       "  /configure mcp                     Configurar servidor MCP local",
-      "  /configure channel install whatsapp Instalar y configurar WhatsApp",
+      "  /configure channel install whatsapp Habilitar y configurar WhatsApp",
       "  /configure channel whatsapp number <+código-país-número> Configurar número permitido",
       "  /configure channel whatsapp link   Mostrar QR para vincular",
       "  /configure channel install telegram Instalar canal Telegram",
@@ -865,8 +928,11 @@ export class InteractiveConsole {
       "  /configure web provider <tipo>     duckduckgo, brave u off",
       "  /configure web api-key <clave>     Configurar clave de Brave",
       "  /configure web scrape on|off       Habilitar o deshabilitar scraping",
+      "  /configure pdf on|off              Habilitar o deshabilitar creación de PDF",
+      "  /voz on|off|estado                 Activar, desactivar o consultar respuestas de voz por WhatsApp",
       "  /channels                          Mostrar canales",
       "  /skills                            Mostrar skills",
+      "  /memory clear                      Borrar el historial de conversación en memoria",
       "  /status                            Estado del agente",
       "  /models                            Consultar modelos disponibles",
       "  /start                             Iniciar el servicio en segundo plano",

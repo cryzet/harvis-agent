@@ -13,12 +13,28 @@ export async function installChannel(input, { config, paths, save, install = ins
       '@openclaw/whatsapp necesita el host OpenClaw. En Harvis instala "whatsapp", que usa el mismo motor Baileys.',
     );
   }
+  if (normalized === "whatsapp" || normalized === "wa") {
+    const requireFromApplication = createRequire(new URL("../package.json", import.meta.url));
+    for (const dependency of ["baileys", "qrcode-terminal"]) {
+      try { requireFromApplication.resolve(dependency); }
+      catch (error) {
+        throw new Error(
+          `Falta ${dependency}. Ejecuta npm start o npm run install:agent antes de configurar WhatsApp.`,
+          { cause: error },
+        );
+      }
+    }
+    let channel = config.channels.find((item) => item.type === "whatsapp");
+    if (!channel) {
+      channel = { type: "whatsapp", enabled: true };
+      config.channels.push(channel);
+    } else {
+      channel.enabled = true;
+    }
+    save();
+    return "Canal WhatsApp habilitado. Sus dependencias ya están instaladas por el instalador de Harvis. Puedes configurar el número administrador y vincularlo con QR.";
+  }
   const builtIns = {
-    whatsapp: {
-      packages: ["baileys@7.0.0-rc14", "qrcode-terminal@0.12.0"],
-      description: "Baileys para vincular WhatsApp mediante QR",
-      message: "Harvis te preguntará si quieres vincularlo ahora con un QR.",
-    },
     telegram: {
       packages: ["grammy@1.46.0"],
       description: "grammY para conectar el bot de Telegram",

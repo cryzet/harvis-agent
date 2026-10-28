@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import mammoth from "mammoth";
+import { PDFDocument } from "pdfkit";
 import { normalizeInternationalPhoneNumber } from "./phone-number.js";
 import {
   changeIgnoredNumber,
@@ -59,21 +60,21 @@ export async function prepareWorkDirectory(name) {
 }
 
 export const fileToolDefinitions = [
-  tool("list_files", "Lista archivos y carpetas dentro de Documents/<nombre>_WorkDir/files. Disponible solo para el administrador autenticado.", {
+  tool("list_files", "Lista archivos dentro de la carpeta de trabajo de Harvis. Usa rutas relativas a esa carpeta. Solo administrador autenticado.", {
     path: { type: "string", description: "Ruta relativa al directorio de trabajo; por defecto, la raíz." },
   }),
   tool("read_file", "Lee un archivo de texto, documento o imagen dentro del directorio de trabajo. Disponible solo para el administrador autenticado.", {
-    path: { type: "string", description: "Ruta relativa o absoluta dentro de Documents/<nombre>_WorkDir/files." },
+    path: { type: "string", description: "Ruta relativa a la carpeta de trabajo indicada por Harvis, por ejemplo notas/hoy.txt." },
   }, ["path"]),
-  tool("write_file", "Crea o reemplaza un archivo dentro del directorio de trabajo. Disponible solo para el administrador autenticado.", {
-    path: { type: "string", description: "Ruta relativa o absoluta dentro de Documents/<nombre>_WorkDir/files; la carpeta debe existir." },
+  tool("write_file", "Crea o reemplaza archivos de trabajo dentro de files. El agente puede guardar notas, recordatorios y otra información útil para solicitudes futuras sin pedir autorización para cada archivo. Disponible solo en sesiones autenticadas del administrador.", {
+    path: { type: "string", description: "Nombre o ruta relativa a la carpeta de trabajo indicada por Harvis, por ejemplo notas/hoy.txt. No inventes una ruta de Documents ni escribas en config." },
     content: { type: "string", description: "Contenido de texto que se guardará." },
   }, ["path", "content"]),
   tool("delete_file", "Elimina un archivo (no una carpeta) dentro del directorio de trabajo. Disponible solo para el administrador autenticado.", {
-    path: { type: "string", description: "Ruta relativa o absoluta dentro de Documents/<nombre>_WorkDir/files." },
+    path: { type: "string", description: "Ruta relativa a la carpeta de trabajo indicada por Harvis, por ejemplo notas/hoy.txt." },
   }, ["path"]),
-  tool("send_file", "Envía un archivo de files al administrador por el canal actual (WhatsApp, Telegram o Discord). Usa la misma ruta relativa que write_file devolvió.", {
-    path: { type: "string", description: "Nombre/ruta relativa dentro de files, por ejemplo informe.txt o inbox/whatsapp/foto.jpg. No antepongas files/." },
+  tool("send_file", "Si el administrador autenticado pide expresamente crear y/o enviar un archivo, esta petición autoriza el envío por el canal actual (WhatsApp, Telegram o Discord); no pidas confirmación adicional. Nunca envíes archivos por iniciativa propia. Usa la ruta relativa que write_file devolvió.", {
+    path: { type: "string", description: "Ruta relativa a la carpeta de trabajo indicada por Harvis, por ejemplo informe.txt o inbox/whatsapp/foto.jpg. No antepongas files/." },
     caption: { type: "string", description: "Texto opcional que acompaña al archivo." },
   }, ["path"]),
   tool("manage_ignored_number", "Administra números de WhatsApp excluidos de las respuestas a clientes. Solo administrador.", {
@@ -97,10 +98,21 @@ export const fileToolDefinitions = [
     message: { type: "string", description: "Texto exacto o redactado según la solicitud del administrador; máximo 4000 bytes." },
   }, ["phoneNumber", "message"]),
   tool("read_soul", "Lee soul.md, las directrices del agente principal. Solo administrador.", {}),
-  tool("write_soul", "Actualiza soul.md, las directrices del agente principal. Solo administrador.", {
+  tool("write_soul", "Actualiza soul.md, la personalidad del agente principal, solo cuando el administrador lo pida explícitamente.", {
     content: { type: "string", description: "Contenido completo de soul.md." },
   }, ["content"]),
 ];
+
+export const pdfToolDefinition = tool(
+  "create_pdf",
+  "Crea un PDF de texto y lo guarda en files. Úsala cuando el administrador solicite un PDF. La ruta es relativa a la carpeta de trabajo; si omites .pdf, se añade automáticamente.",
+  {
+    path: { type: "string", description: "Ruta/nombre dentro de files, por ejemplo informes/resumen.pdf." },
+    content: { type: "string", description: "Texto del documento. Se ajusta a varias páginas automáticamente." },
+    title: { type: "string", description: "Título opcional que se muestra al inicio del PDF." },
+  },
+  ["path", "content"],
+);
 
 export function createFileToolHandlers({
   config,
@@ -175,6 +187,8 @@ export function createFileToolHandlers({
       }
       const root = await getWorkDirectory(config.name);
       const target = await resolveSafePath(path, root, { allowMissing: true });
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      await assertInsideRoot(await realpath(root), await realpath(dirname(target)));
       try {
         if ((await lstat(target)).isSymbolicLink()) {
           throw new Error("No se permite reemplazar enlaces simbólicos.");
@@ -184,6 +198,42 @@ export function createFileToolHandlers({
       }
       await writeFile(target, content, { encoding: "utf8", flag: "w", mode: 0o600 });
       return `Archivo guardado: ${displayPath(target)}.`;
+    },
+    create_pdf: async ({ path, content, title = "" }, context) => {
+      requireAdmin(context);
+      if (typeof path !== "string" || !path.trim()) {
+        throw new Error("Indica la ruta/nombre del PDF dentro de files.");
+      }
+      if (typeof content !== "string" || !content.trim()) {
+        throw new Error("Indica el contenido del PDF.");
+      }
+      if (Buffer.byteLength(content, "utf8") > maxTextBytes) {
+        throw new Error("El contenido del PDF supera el límite de 1 MB.");
+      }
+      if (typeof title !== "string" || Buffer.byteLength(title, "utf8") > 500) {
+        throw new Error("El título del PDF no puede superar 500 bytes.");
+      }
+      const requestedPath = path.trim();
+      const pdfPath = requestedPath.toLowerCase().endsWith(".pdf")
+        ? requestedPath
+        : `${requestedPath}.pdf`;
+      const root = await getWorkDirectory(config.name);
+      const target = await resolveSafePath(pdfPath, root, { allowMissing: true });
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      await assertInsideRoot(await realpath(root), await realpath(dirname(target)));
+      const buffer = await renderPdf({ title: title.trim(), content });
+      if (buffer.length > maxTransferBytes) {
+        throw new Error("El PDF generado supera el límite de archivo de 16 MB.");
+      }
+      try {
+        await writeFile(target, buffer, { flag: "wx", mode: 0o600 });
+      } catch (error) {
+        if (error.code === "EEXIST") {
+          throw new Error("Ya existe un archivo en esa ruta. Elige otro nombre para conservar el archivo existente.");
+        }
+        throw error;
+      }
+      return `PDF creado: ${displayPath(target)}. Usa send_file con esa ruta si el administrador también pidió enviarlo.`;
     },
     delete_file: async ({ path }, context) => {
       requireAdmin(context);
@@ -322,6 +372,28 @@ function requireAdmin(context) {
   }
 }
 
+function renderPdf({ title, content }) {
+  return new Promise((resolveOutput, rejectOutput) => {
+    const document = new PDFDocument({
+      autoFirstPage: true,
+      margin: 54,
+      info: title ? { Title: title } : undefined,
+    });
+    const chunks = [];
+    document.on("data", (chunk) => chunks.push(chunk));
+    document.once("end", () => resolveOutput(Buffer.concat(chunks)));
+    document.once("error", rejectOutput);
+    if (title) document.font("Helvetica-Bold").fontSize(18).text(title);
+    document.moveDown(title ? 0.7 : 0);
+    document.font("Helvetica").fontSize(11).text(content, {
+      align: "left",
+      lineGap: 3,
+      paragraphGap: 6,
+    });
+    document.end();
+  });
+}
+
 async function resolveSafePath(input, workRoot, { allowMissing = false } = {}) {
   if (typeof input !== "string" || !input.trim()) throw new Error("Indica una ruta de archivo.");
   const root = await realpath(workRoot);
@@ -353,15 +425,12 @@ async function resolveSafePath(input, workRoot, { allowMissing = false } = {}) {
     }
   }
   if (!allowMissing) throw new Error("El archivo no existe.");
-  const parent = dirname(target);
-  const realParent = await realpath(parent);
-  await assertInsideRoot(root, realParent);
   return target;
 }
 
 async function assertInsideRoot(root, target) {
   if (isInsideRoot(root, target)) return;
-  throw new Error("Por seguridad, Harvis solo puede gestionar archivos dentro de Documents/<nombre>_WorkDir/files.");
+  throw new Error("Por seguridad, Harvis solo puede gestionar archivos dentro de la carpeta files del perfil configurado.");
 }
 
 function isInsideRoot(root, target) {
